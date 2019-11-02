@@ -2,6 +2,7 @@ import copy
 from time import time
 from os import system
 import sys
+import json
 from importlib import import_module
 import numpy as np
 from nbodykit.lab import ArrayMesh, FFTPower
@@ -14,9 +15,14 @@ from torchsummary import summary
 
 from matplotlib import pyplot as plt
 
+NETWOR_NR = int(sys.argv[1])
+CONFIG_NR = int(sys.argv[2])
 SIZE = 1024
+
 START_TIME = time()
-MAX_TIME  = 8.0 # minutes
+
+# TODO
+MAX_TIME  = 350.0 # minutes
 GPU_AVAIL = torch.cuda.is_available() # if TRUE, we're on a computing node, otherwise on head node
 if GPU_AVAIL :
     print 'Found %d GPUs.'%torch.cuda.device_count()
@@ -26,6 +32,8 @@ else :
     torch.set_num_threads(2)
 
 
+sys.path.append('/home/lthiele/DM_to_electrons/Networks')
+
 """
 TODO
 write code for testing
@@ -33,12 +41,12 @@ read from config file
 """
 
 class GlobalData(object) :#{{{
-    def __init__(self) :#{{{
+    def __init__(self, configs) :#{{{
         # TODO read in some params file
         if GPU_AVAIL :
             print 'Starting to copy data to /tmp'
             system('cp /tigress/lthiele/boxes/hdf5_files/size_%d.hdf5 /tmp/'%SIZE)
-            print 'Finished copying data to /tmp, took %.2e seconds'%(time()-START_TIME) # 4.06e+02 seconds
+            print 'Finished copying data to /tmp, took %.2e seconds'%(time()-START_TIME) # 4.06e+02 seconds for 2048
             self.data_path = '/tmp/size_%d.hdf5'%SIZE
         else :
             self.data_path = '/tigress/lthiele/boxes/hdf5_files/size_%d.hdf5'%SIZE # presumably move this data to local node /tmp
@@ -63,14 +71,14 @@ class GlobalData(object) :#{{{
         self.global_dtype = np.float32
 
         # training hyperparameters
-        self.__eval_period = 32
+        self.__eval_period = 128 # after how many steps the validation loss is evaluated
         self.__loss_function = nn.MSELoss
         self.__optimizer = torch.optim.Adam
-        self.__learning_rate = 1e-5
+        self.__learning_rate = configs["learning_rate"]
         self.__betas = (0.9, 0.999)
         self.__eps = 1e-8
         self.__weight_decay = 1e-4 # L2 regularization
-        self.__batch_size = 16 if GPU_AVAIL else 4
+        self.__batch_size = (16*2048)/SIZE if GPU_AVAIL else (4*2048)/SIZE
         self.__num_workers = 1 # don't put this larger than 1 for single hdf5 file! (o/wise input corrupted)
 
         # keep track of training
@@ -225,6 +233,10 @@ class InputData(Dataset) :#{{{
             yy+(self.globdat.DM_sidelength-self.globdat.gas_sidelength)/2 : yy+(self.globdat.DM_sidelength+self.globdat.gas_sidelength)/2,
             zz+(self.globdat.DM_sidelength-self.globdat.gas_sidelength)/2 : zz+(self.globdat.DM_sidelength+self.globdat.gas_sidelength)/2,
             ]
+
+        # normalize input to (-1,1)
+        DM *= 2.0
+        DM -= 1.0
         return DM, gas
     #}}}
     def __getitem__(self, index) :#{{{
@@ -533,15 +545,18 @@ if False :
 
 # TRAINING
 if True :
-    globdat = GlobalData()
 
-    sys.path.append('./Networks')
-    globdat.net = Network(import_module('network_1').this_network)
+    with open('/home/lthiele/DM_to_electrons/Configs/config_%d.json'%CONFIG_NR) as f :
+        configs = json.load(f)
+
+    globdat = GlobalData(configs)
+
+    globdat.net = Network(import_module('network_%d'%NETWOR_NR).this_network)
     if GPU_AVAIL :
         globdat.net.cuda()
 
 # TODO
-    summary(globdat.net, (1, 64, 64, 64))
+    summary(globdat.net, (1, 32, 32, 32))
 
     loss_function = globdat.loss_function()
     optimizer = globdat.optimizer()
@@ -549,11 +564,13 @@ if True :
     training_set   = InputData(globdat, 'training')
     validation_set = InputData(globdat, 'validation')
 
-    for _ in xrange(globdat.num_epochs) :
+    while True : # train until time is up
+
         training_set.generate_rnd_indices()
         validation_set.generate_rnd_indices()
         training_loader   = globdat.data_loader(training_set)
         validation_loader = globdat.data_loader(validation_set)
+
         for t, data in enumerate(training_loader) :
 
             globdat.net.train()
@@ -573,7 +590,6 @@ if True :
                     torch.autograd.Variable(data[1], requires_grad=False)
                     )
             globdat.update_training_loss(loss.item())
-            print "%.3e"%loss.item()
             loss.backward()
             optimizer.step()
             
@@ -600,9 +616,9 @@ if True :
                 globdat.update_validation_loss(_loss/(t_val+1.0))
 
             if globdat.stop_training() :
-                globdat.save_loss('loss.npz')
-                globdat.save_network('trained_network.pt')
+                globdat.save_loss('loss_%d_%d.npz'%(NETWOR_NR,CONFIG_NR))
+                globdat.save_network('trained_network_%d_%d.pt'%(NETWOR_NR,CONFIG_NR))
                 sys.exit(0)
 
-        globdat.save_loss('loss.npz')
-        globdat.save_network('trained_network.pt')
+        globdat.save_loss('loss_%d_%d.npz'%(NETWOR_NR,CONFIG_NR))
+        globdat.save_network('trained_network_%d_%d.pt'%(NETWOR_NR,CONFIG_NR))

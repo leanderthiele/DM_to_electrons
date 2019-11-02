@@ -1,27 +1,24 @@
 """
-3 Levels, no concatenation in Level 0
-use saved memory for more features
-about 4 GB
+4 Levels, all possible concatenations
 """
 
-
 this_network = {#{{{
-    'NLevels': 3,
+    'NLevels': 4,
 
     'Level_0': {
-        'concat': False,
+        'concat': True,
         'in': [
                 {
                     'inplane': 1,
-                    'outplane': 64,
+                    'outplane': 32,
                 },
                 {
-                    'inplane': 64,
-                    'outplane': 64,
+                    'inplane': 32,
+                    'outplane': 32,
                 },
                 {
-                    'inplane': 64,
-                    'outplane': 64,
+                    'inplane': 32,
+                    'outplane': 32,
                 },
         ],
         'out': [
@@ -48,13 +45,54 @@ this_network = {#{{{
                                     'kernel_size': 1,
                                     'padding': 0,
                                },
-                    'activation': None,
                     'batch_norm': None,
+                    'activation': None,
                 },
         ],
     },
 
     'Level_1': {
+        'concat': True,
+        'in': [
+                {
+                    'inplane': 32,
+                    'outplane': 64,
+                    'conv_kw': {
+                                    'stride': 2,
+                               },
+                },
+                {
+                    'inplane': 64,
+                    'outplane': 64,
+                },
+                {
+                    'inplane': 64,
+                    'outplane': 64,
+                },
+        ],
+        'out': [
+                {
+                    'inplane': 128,
+                    'outplane': 64,
+                },
+                {
+                    'inplane': 64,
+                    'outplane': 64,
+                },
+                {
+                    'inplane': 64,
+                    'outplane': 32,
+                    'conv': 'ConvTranspose',
+                    'conv_kw': {
+                                    'stride': 2,
+                                    'padding': 0,
+                               },
+                    'crop_output': True,
+                },
+        ],
+    },
+
+    'Level_2': {
         'concat': True,
         'in': [
                 {
@@ -68,15 +106,11 @@ this_network = {#{{{
                     'inplane': 128,
                     'outplane': 128,
                 },
-                {
-                    'inplane': 128,
-                    'outplane': 128,
-                },
         ],
         'out': [
                 {
-                    'inplane': 256,
-                    'outplane': 128,
+                    'inplane':  256,
+                    'outplane': 128
                 },
                 {
                     'inplane': 128,
@@ -95,7 +129,7 @@ this_network = {#{{{
         ],
     },
 
-    'Level_2': {
+    'Level_3': {
         'through': [
                 {
                     'inplane': 128,

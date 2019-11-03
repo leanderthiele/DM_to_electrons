@@ -155,8 +155,8 @@ class Arrow(object) :#{{{
         self.yout = point_out.yy
         self.mode = mode
         self.description = ''
-    def draw(self) :
-        self.set_text()
+    def draw(self, pos='non_defaults') :
+        self.set_text(pos)
         if self.mode.conv is 'Copy' :
             ls = 'dashed'
         else :
@@ -195,24 +195,44 @@ class Arrow(object) :#{{{
                 )
             FILE.write('\n')
     def add_text(self, text) :
-        self.description += r'\texttt{%s}\\'%text
-    def set_text(self) :
+        self.description += r'%s\\'%text
+    def set_text(self, pos='non_defaults') :
         # TODO
         if self.description is not '' :
-            FILE.write(
-                r'\draw[ultra thin] (%.2f,%.2f) -- (%.2f,%.2f);'%(
-                    0.5*(self.xin+0.5*B+self.xout-T), 0.5*(self.yin+self.yout),
-                    0.5*(self.xin+0.5*B+self.xout-T), (NLevels+5)*VERT,
+            if pos is 'non_defaults' :
+                FILE.write(
+                    r'\draw[ultra thin] (%.2f,%.2f) -- (%.2f,%.2f);'%(
+                        0.5*(self.xin+0.5*B+self.xout-T), 0.5*(self.yin+self.yout),
+                        0.5*(self.xin+0.5*B+self.xout-T), (NLevels+5)*VERT,
+                        )
                     )
-                )
+            elif pos is 'defaults' :
+                FILE.write(
+                    r'\draw[ultra thin] (%.2f,%.2f) -- (%.2f,%.2f);'%(
+                        0.5*(self.xin+0.5*B+self.xout-T), 0.5*(self.yin+self.yout),
+                        0.5*(self.xin+0.5*B+self.xout-T), (-4)*VERT,
+                        )
+                    )
+            else :
+                raise RuntimeError('pos must be either defaults or non_defaults.')
             FILE.write('\n')
-            FILE.write(
-                r'\node[align=left,rotate=90,anchor=%s] at (%.2f,%.2f) {%s};'%(
-                    'north east' if VERT>0 else 'north west',
-                    0.5*(self.xin+0.5*B+self.xout-T), (NLevels+5)*VERT,
-                    self.description
+            if pos is 'non_defaults' :
+                FILE.write(
+                    r'\node[align=left,rotate=90,anchor=%s] at (%.2f,%.2f) {%s};'%(
+                        'north east' if VERT>0 else 'north west',
+                        0.5*(self.xin+0.5*B+self.xout-T), (NLevels+5)*VERT,
+                        self.description
+                        )
                     )
-                )
+            elif pos is 'defaults' :
+                FILE.write(
+                    r'\node[align=left,anchor=%s,text width=%.2f cm] at (%.2f,%.2f) {%s};'%(
+                        'south west' if VERT>0 else 'north west',
+                        8,
+                        0.5*(self.xin+0.5*B+self.xout-T), (-4)*VERT,
+                        self.description
+                        )
+                    )
             FILE.write('\n')
 #}}}
 
@@ -263,6 +283,10 @@ def __flatten_dict(d, parent_key='', sep='_'):#{{{
     return dict(items)
 #}}}
 __default_param_flat = __flatten_dict(__default_param)
+__default_param_text = ''
+for key, value in __default_param_flat.items() :
+    if key is 'inplane' or key is 'outplane': continue
+    __default_param_text += r'\mbox{\texttt{%s:%s}}, '%(key,value)
 
 def draw_network(index) :#{{{
     global FILE
@@ -282,6 +306,8 @@ def draw_network(index) :#{{{
     l.draw()
     l.set_text()
     xx += 1
+
+    gave_defaults = False
 
     # contracting path
     for ii in xrange(NLevels) :
@@ -304,8 +330,14 @@ def draw_network(index) :#{{{
                 if key is 'inplane' or key is 'outplane' :
                     continue
                 if __default_param_flat[key] != value :
-                    a.add_text(r'%s:%s'%(key, value))
-            a.draw()
+                    a.add_text(r'\texttt{%s:%s}'%(key, value))
+            if a.description is '' and not gave_defaults :
+                a.add_text(r'default parameters:')
+                a.add_text(__default_param_text)
+                gave_defaults = True
+                a.draw('defaults')
+            else :
+                a.draw('non_defaults')
             l = Layer(Point(xx*HORI, ii*VERT), level_states[ii])
             l.draw()
             xx += 1
@@ -335,7 +367,7 @@ def draw_network(index) :#{{{
                 if key is 'inplane' or key is 'outplane' :
                     continue
                 if __default_param_flat[key] != value :
-                    a.add_text(r'%s:%s'%(key, value))
+                    a.add_text(r'\texttt{%s:%s}'%(key, value))
             a.draw()
             l = Layer(Point(xx*HORI, ii*VERT), level_states[ii])
             if ii == 0 and jj == len(this_network['Level_0']['out'])-1 :

@@ -219,11 +219,13 @@ class InputData(Dataset) :#{{{
 
         self.file = h5py.File(self.globdat.data_path, 'r')
         self.DM_dataset = self.file['DM/'+self.mode]
-        self.DM_min_log10 = self.file['DM'].attrs['min_log10']
-        self.DM_max_log10 = self.file['DM'].attrs['max_log10']
         self.gas_dataset = self.file['gas/'+self.mode]
-        self.gas_min_log10 = self.file['gas'].attrs['min_log10']
-        self.gas_max_log10 = self.file['gas'].attrs['max_log10']
+
+        # need these if we want to transform back
+        self.DM_training_mean    = self.file['DM'].attrs['training_mean']
+        self.DM_training_stddev  = self.file['DM'].attrs['training_stddev']
+        self.gas_training_mean   = self.file['gas'].attrs['training_mean']
+        self.gas_training_stddev = self.file['gas'].attrs['training_stddev']
         
         self.xx_indices_rnd = None
         self.yy_indices_rnd = None
@@ -286,10 +288,6 @@ class InputData(Dataset) :#{{{
             yy+(self.globdat.DM_sidelength-self.globdat.gas_sidelength)/2 : yy+(self.globdat.DM_sidelength+self.globdat.gas_sidelength)/2,
             zz+(self.globdat.DM_sidelength-self.globdat.gas_sidelength)/2 : zz+(self.globdat.DM_sidelength+self.globdat.gas_sidelength)/2,
             ]
-
-        # normalize input to (-1,1)
-        DM *= 2.0
-        DM -= 1.0
         return DM, gas
     #}}}
     def __getitem__(self, index) :#{{{

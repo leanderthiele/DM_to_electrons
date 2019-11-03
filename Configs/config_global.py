@@ -1,5 +1,5 @@
 this_config = {
-    'box_sidelength': 2048,
+    'box_sidelength': 1024,
 
     # these numbers are for the 2048 box,
     # they get rescaled for other box sizes

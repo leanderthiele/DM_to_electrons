@@ -3,8 +3,8 @@ import collections
 import copy
 from importlib import import_module
 
-DIM_IN = 32 # current DM box size
-DIM_OUT = 16 # current gas box size
+DIM_IN = 64 # current DM box size
+DIM_OUT = 32 # current gas box size
 
 # First determine all the plane coordinates
 HORI = 0.75 # units

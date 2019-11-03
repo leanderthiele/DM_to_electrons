@@ -1,10 +1,9 @@
 \documentclass[landscape]{article}
 
+\usepackage{caption}
 \usepackage{underscore}
 \usepackage[left=2cm,right=2cm,top=2cm,bottom=2cm]{geometry}
 \usepackage{tikz}
-
-\begin{document}
 
 \newcommand\singlenetwork[1]{
 	\begin{figure}
@@ -13,12 +12,16 @@
 		\begin{tikzpicture}
 		\input{#1}
 		\end{tikzpicture}
-		\caption{
+		\caption*{
 		\texttt{#1}
 		}
 	\end{figure}
 	\newpage
 }
+
+\begin{document}
+
+\pagenumbering{gobble}
 
 \singlenetwork{network0}
 \singlenetwork{network1}

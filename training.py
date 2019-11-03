@@ -14,9 +14,9 @@ from torch.utils.data import DataLoader
 from torchsummary import summary
 
 from matplotlib import pyplot as plt
+from matplotlib import gridspec as gs
+from matplotlib.patches import Rectangle
 
-NETWOR_NR = int(sys.argv[1])
-CONFIG_NR = int(sys.argv[2])
 SIZE = 1024
 
 START_TIME = time()
@@ -519,32 +519,96 @@ class Analysis(object) :#{{{
 
 
 # OUTPUT TESTING
-if False :
-    globdat = GlobalData()
-    globdat.load_network('trained_network.pt')
-    validation_set = InputData(globdat, 'validation')
-    validation_loader = globdat.data_loader(validation_set)
-    if True :
+if True :
+    NETWOR_NR = 2
+    CONFIG_NR = 1
 
-        for t, data in enumerate(validation_loader) :
-            with torch.no_grad() :
-                target = copy.deepcopy(data[1])
-                orig   = copy.deepcopy(data[0])
-                pred = globdat.net(
-                    torch.autograd.Variable(data[0], requires_grad=False)
-                    )
-            for ii in xrange(4) :
-                fig, ax = plt.subplots(ncols=3)
-                ax[0].matshow(orig[ii,0,26,:,:].numpy())
-                ax[1].matshow(target[ii,0,10,:,:].numpy())
-                ax[2].matshow(pred[ii,0,10,:,:].numpy())
-                ax[0].set_title('Original')
-                ax[1].set_title('Target')
-                ax[2].set_title('Prediction')
-                plt.show()
+    with open('/home/lthiele/DM_to_electrons/Configs/config_%d.json'%CONFIG_NR) as f :
+        configs = json.load(f)
+
+    globdat = GlobalData(configs)
+    globdat.load_network('trained_network_%d_%d.pt'%(NETWOR_NR,CONFIG_NR))
+    validation_set = InputData(globdat, 'validation')
+    validation_set.generate_rnd_indices()
+    validation_loader = globdat.data_loader(validation_set)
+
+    NPAGES = 4
+    for t, data in enumerate(validation_loader) :
+        if t == NPAGES : break
+
+        with torch.no_grad() :
+            targ = copy.deepcopy(data[1])
+            orig = copy.deepcopy(data[0])
+            pred = globdat.net(
+                torch.autograd.Variable(data[0], requires_grad=False)
+                )
+        
+        NPlots = 8
+        fig = plt.figure(figsize=(8.5, 11.0))
+        gs0 = gs.GridSpec(NPlots/2, 2, figure=fig, wspace = 0.2)
+        for ii in xrange(NPlots) :
+            plane_gas = np.random.randint(0, high=globdat.gas_sidelength)
+            plane_DM  = plane_gas + (globdat.DM_sidelength-globdat.gas_sidelength)/2
+
+            gs00 = gs.GridSpecFromSubplotSpec(
+                2, 3, subplot_spec=gs0[ii%(NPlots/2), ii/(NPlots/2)],
+                wspace = 0.1
+                )
+            ax_orig = plt.subplot(gs00[:,:2])
+            ax_targ = plt.subplot(gs00[:1,-1])
+            ax_pred = plt.subplot(gs00[1:,-1])
+            fig.add_subplot(ax_orig)
+            fig.add_subplot(ax_targ)
+            fig.add_subplot(ax_pred)
+
+            ax_orig.matshow(orig[ii,0,plane_DM,:,:].numpy(), extent=(0, globdat.DM_sidelength, 0, globdat.DM_sidelength))
+            ax_targ.matshow(targ[ii,0,plane_gas,:,:].numpy())
+            ax_pred.matshow(pred[ii,0,plane_gas,:,:].numpy())
+
+            rect = Rectangle(
+                (
+                    (globdat.DM_sidelength-globdat.gas_sidelength)/2,
+                    (globdat.DM_sidelength-globdat.gas_sidelength)/2,
+                ),
+                width=globdat.gas_sidelength, height=globdat.gas_sidelength,
+                axes = ax_orig,
+                edgecolor = 'red',
+                fill = False,
+                )
+            ax_orig.add_patch(rect)
+
+            ax_orig.set_xticks([])
+            ax_targ.set_xticks([])
+            ax_pred.set_xticks([])
+            ax_orig.set_yticks([])
+            ax_targ.set_yticks([])
+            ax_pred.set_yticks([])
+
+            ax_orig.set_ylabel('Input DM field')
+            ax_targ.set_ylabel('Target')
+            ax_pred.set_ylabel('Prediction')
+
+        plt.suptitle('Network: %d, Configs: %d'%(NETWOR_NR,CONFIG_NR), family='monospace')
+        plt.savefig('./Outputs/comparison_target_predicted_%d_%d_pg%d.pdf'%(NETWOR_NR,CONFIG_NR,t))
+        plt.cla()
+
+
+
+
+#            for ii in xrange(4) :
+#                fig, ax = plt.subplots(ncols=3)
+#                ax[0].matshow(orig[ii,0,18,:,:].numpy())
+#                ax[1].matshow(targ[ii,0,10,:,:].numpy())
+#                ax[2].matshow(pred[ii,0,10,:,:].numpy())
+#                ax[0].set_title('Original')
+#                ax[1].set_title('Target')
+#                ax[2].set_title('Prediction')
+#                plt.show()
 
 # TRAINING
-if True :
+if False :
+    NETWOR_NR = int(sys.argv[1])
+    CONFIG_NR = int(sys.argv[2])
 
     with open('/home/lthiele/DM_to_electrons/Configs/config_%d.json'%CONFIG_NR) as f :
         configs = json.load(f)

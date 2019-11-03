@@ -50,7 +50,7 @@ class GlobalData(object) :#{{{
             self.data_path = '/tmp/size_%d.hdf5'%SIZE
         else :
             self.data_path = '/tigress/lthiele/boxes/hdf5_files/size_%d.hdf5'%SIZE # presumably move this data to local node /tmp
-        self.__output_path = '/home/lthiele/DM_to_electrons/Outputs'
+        self.__output_path = '/home/lthiele/DM_to_electrons/Outputs/'
 
         self.global_dtype = np.float32
         self.block_shapes = {'training':   (SIZE, SIZE           , (1428*SIZE)/2048),

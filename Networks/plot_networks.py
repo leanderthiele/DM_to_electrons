@@ -10,6 +10,11 @@ DIM_OUT = 16 # current gas box size
 HORI = 0.75 # units
 VERT = 1.0 # units
 
+# Pretty Layers
+T = 0.1*HORI
+A = 0.1*abs(VERT)
+B = 0.1*HORI
+
 
 class Point(object) :#{{{
     def __init__(self, xx, yy) :
@@ -70,8 +75,62 @@ class Layer(object) :#{{{
             r'$%d\times%d^3$'%(self.mode.Nchannels,self.mode.dim)
             )
     def draw(self) :
+#        FILE.write(
+#            r'\draw[thick] (%.2f,%.2f) -- (%.2f,%.2f);'%(self.xx,self.yy-0.5*VERT,self.xx,self.yy+0.5*VERT)
+#            )
+#        FILE.write('\n')
         FILE.write(
-            r'\draw[thick] (%.2f,%.2f) -- (%.2f,%.2f);'%(self.xx,self.yy-0.5*VERT,self.xx,self.yy+0.5*VERT)
+            r'\draw (%.2f,%.2f) -- (%.2f,%.2f);'%(
+                self.xx-T, self.yy-0.5*abs(VERT)-0.5*A, self.xx-T, self.yy+0.5*abs(VERT)-0.5*A
+                )
+            )
+        FILE.write('\n')
+        FILE.write(
+            r'\draw (%.2f,%.2f) -- (%.2f,%.2f);'%(
+                self.xx, self.yy-0.5*abs(VERT)-0.5*A, self.xx, self.yy+0.5*abs(VERT)-0.5*A
+                )
+            )
+        FILE.write('\n')
+        FILE.write(
+            r'\draw (%.2f,%.2f) -- (%.2f,%.2f);'%(
+                self.xx-T, self.yy-0.5*abs(VERT)-0.5*A, self.xx, self.yy-0.5*abs(VERT)-0.5*A
+                )
+            )
+        FILE.write('\n')
+        FILE.write(
+            r'\draw (%.2f,%.2f) -- (%.2f,%.2f);'%(
+                self.xx-T, self.yy+0.5*abs(VERT)-0.5*A, self.xx, self.yy+0.5*abs(VERT)-0.5*A
+                )
+            )
+        FILE.write('\n')
+        FILE.write(
+            r'\draw (%.2f,%.2f) -- (%.2f,%.2f);'%(
+                self.xx+B, self.yy-0.5*abs(VERT)+0.5*A, self.xx+B, self.yy+0.5*abs(VERT)+0.5*A
+                )
+            )
+        FILE.write('\n')
+        FILE.write(
+            r'\draw (%.2f,%.2f) -- (%.2f,%.2f);'%(
+                self.xx, self.yy-0.5*abs(VERT)-0.5*A, self.xx+B, self.yy-0.5*abs(VERT)+0.5*A
+                )
+            )
+        FILE.write('\n')
+        FILE.write(
+            r'\draw (%.2f,%.2f) -- (%.2f,%.2f);'%(
+                self.xx, self.yy+0.5*abs(VERT)-0.5*A, self.xx+B, self.yy+0.5*abs(VERT)+0.5*A
+                )
+            )
+        FILE.write('\n')
+        FILE.write(
+            r'\draw (%.2f,%.2f) -- (%.2f,%.2f);'%(
+                self.xx-T, self.yy+0.5*abs(VERT)-0.5*A, self.xx+B-T, self.yy+0.5*abs(VERT)+0.5*A
+                )
+            )
+        FILE.write('\n')
+        FILE.write(
+            r'\draw (%.2f,%.2f) -- (%.2f,%.2f);'%(
+                self.xx-T+B, self.yy+0.5*abs(VERT)+0.5*A, self.xx+B, self.yy+0.5*abs(VERT)+0.5*A
+                )
             )
         FILE.write('\n')
         self.set_text()
@@ -79,7 +138,11 @@ class Layer(object) :#{{{
         self.description += r'%s '%text
     def set_text(self) :
         FILE.write(
-            r'\node [right, rotate=90] at (%.2f,%.2f) {%s};'%(self.xx,self.yy+0.5*VERT,self.description)
+            r'\node [%s, rotate=90] at (%.2f,%.2f) {%s};'%(
+                'right' if VERT>0 else 'left',
+                self.xx, self.yy+0.5*VERT,
+                self.description
+                )
             )
         FILE.write('\n')
 #}}}
@@ -100,31 +163,34 @@ class Arrow(object) :#{{{
             ls = 'thick'
         if self.yin == self.yout :
             FILE.write(
-                r'\draw[->,%s] (%.2f,%.2f) -- (%.2f,%.2f);'%(ls,self.xin,self.yin,self.xout,self.yout)
+                r'\draw[->,%s] (%.2f,%.2f) -- (%.2f,%.2f);'%(
+                    ls,
+                    self.xin+0.5*B,self.yin,self.xout-T,self.yout
+                    )
                 )
             FILE.write('\n')
         else :
             FILE.write(
                 r'\draw[%s] (%.2f,%.2f) -- (%.2f,%.2f);'%(
                     ls,
-                    self.xin, self.yin+np.sign(self.yout-self.yin)*0.25*VERT,
-                    0.5*(self.xin+self.xout), self.yin+np.sign(self.yout-self.yin)*0.25*VERT
+                    self.xin+0.5*B, self.yin+np.sign(self.yout-self.yin)*0.25*VERT*np.sign(VERT),
+                    0.5*(self.xin+0.5*B+self.xout-T), self.yin+np.sign(self.yout-self.yin)*0.25*VERT*np.sign(VERT)
                     )
                 )
             FILE.write('\n')
             FILE.write(
                 r'\draw[%s] (%.2f,%.2f) -- (%.2f,%.2f);'%(
                     ls,
-                    0.5*(self.xin+self.xout), self.yin+np.sign(self.yout-self.yin)*0.25*VERT,
-                    0.5*(self.xin+self.xout), self.yout-np.sign(self.yout-self.yin)*0.25*VERT
+                    0.5*(self.xin+0.5*B+self.xout-T), self.yin+np.sign(self.yout-self.yin)*0.25*VERT*np.sign(VERT),
+                    0.5*(self.xin+0.5*B+self.xout-T), self.yout-np.sign(self.yout-self.yin)*0.25*VERT*np.sign(VERT)
                     )
                 )
             FILE.write('\n')
             FILE.write(
                 r'\draw [->,%s] (%.2f,%.2f) -- (%.2f,%.2f);'%(
                     ls,
-                    0.5*(self.xin+self.xout), self.yout-np.sign(self.yout-self.yin)*0.25*VERT,
-                    self.xout, self.yout-np.sign(self.yout-self.yin)*0.25*VERT
+                    0.5*(self.xin+0.5*B+self.xout-T), self.yout-np.sign(self.yout-self.yin)*0.25*VERT*np.sign(VERT),
+                    self.xout-T, self.yout-np.sign(self.yout-self.yin)*0.25*VERT*np.sign(VERT)
                     )
                 )
             FILE.write('\n')
@@ -134,15 +200,16 @@ class Arrow(object) :#{{{
         # TODO
         if self.description is not '' :
             FILE.write(
-                r'\draw[thin] (%.2f,%.2f) -- (%.2f,%.2f);'%(
-                    0.5*(self.xin+self.xout), 0.5*(self.yin+self.yout),
-                    0.5*(self.xin+self.xout), (NLevels+2)*VERT,
+                r'\draw[ultra thin] (%.2f,%.2f) -- (%.2f,%.2f);'%(
+                    0.5*(self.xin+0.5*B+self.xout-T), 0.5*(self.yin+self.yout),
+                    0.5*(self.xin+0.5*B+self.xout-T), (NLevels+5)*VERT,
                     )
                 )
             FILE.write('\n')
             FILE.write(
-                r'\node[align=left,rotate=90,anchor=north west] at (%.2f,%.2f) {%s};'%(
-                    0.5*(self.xin+self.xout), (NLevels+2)*VERT,
+                r'\node[align=left,rotate=90,anchor=%s] at (%.2f,%.2f) {%s};'%(
+                    'north east' if VERT>0 else 'north west',
+                    0.5*(self.xin+0.5*B+self.xout-T), (NLevels+5)*VERT,
                     self.description
                     )
                 )

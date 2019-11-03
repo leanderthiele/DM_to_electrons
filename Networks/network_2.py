@@ -106,6 +106,10 @@ this_network = {#{{{
                     'inplane': 128,
                     'outplane': 128,
                 },
+                {
+                    'inplane': 128,
+                    'outplane': 128,
+                },
         ],
         'out': [
                 {

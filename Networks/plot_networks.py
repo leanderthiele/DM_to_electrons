@@ -292,10 +292,10 @@ def draw_network(index) :#{{{
     global FILE
     global NLevels
 
-    FILE = open('./tex_files/network%d.tex'%index, 'w')
-
     this_network = import_module('network_%d'%index).this_network
     NLevels = this_network['NLevels']
+
+    FILE = open('./tex_files/network%d.tex'%index, 'w')
     
     xx = 0
 

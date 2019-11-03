@@ -17,12 +17,48 @@ from matplotlib import pyplot as plt
 from matplotlib import gridspec as gs
 from matplotlib.patches import Rectangle
 
-SIZE = 1024
+import argparse
 
+sys.path.append('/home/lthiele/DM_to_electrons/Networks')
+sys.path.append('/home/lthiele/DM_to_electrons/Configs')
+
+# parse the command line#{{{
+parser = argparse.ArgumentParser(description='ArgumentParser for training.py')
+parser.add_argument(
+    '-n', '--network',
+    nargs='?',
+    required = True,
+    )
+parser.add_argument(
+    '-c', '--config',
+    nargs = '+',
+    required = True,
+    )
+parser.add_argument(
+    '-m', '--mode',
+    nargs = '?',
+    required = True,
+    )
+parser.add_argument(
+    '-v', '--verbose',
+    action = 'store_true',
+    )
+ARGS = parser.parse_args()
+assert ARGS.mode=='train' or ARGS.mode=='valid', 'Only train and valid implemented so far, passed %s.'%ARGS.mode
+#}}}
+
+# load config files#{{{
+CONFIGS = []
+for c in ARGS.config :
+    CONFIGS.append(import_module(c).this_config)
+if ARGS.verbose :
+    for ii in xrange(len(ARGS.config)) :
+        print '%s :'%ARGS.config[ii]
+        print CONFIGS[ii]
+#}}}
+
+# Initialize global variables#{{{
 START_TIME = time()
-
-# TODO
-MAX_TIME  = 350.0 # minutes
 GPU_AVAIL = torch.cuda.is_available() # if TRUE, we're on a computing node, otherwise on head node
 if GPU_AVAIL :
     print 'Found %d GPUs.'%torch.cuda.device_count()
@@ -30,56 +66,80 @@ if GPU_AVAIL :
 else :
     print 'Could not find GPU.'
     torch.set_num_threads(2)
-
-
-sys.path.append('/home/lthiele/DM_to_electrons/Networks')
+#}}}
 
 """
 TODO
 write code for testing
-read from config file
 """
 
+_names = {#{{{
+    'Conv': nn.Conv3d,
+    'ConvTranspose': nn.ConvTranspose3d,
+    'BatchNorm': nn.BatchNorm3d,
+    'ReLU': nn.ReLU,
+    'MSELoss': nn.MSELoss,
+    'Adam': torch.optim.Adam,
+    }
+#}}}
+def _merge(source, destination):#{{{
+    # overwrites field in destination if field exists in source, otherwise just merges
+    for key, value in source.items():
+        if isinstance(value, dict):
+            node = destination.setdefault(key, {})
+            _merge(value, node)
+        else:
+            destination[key] = value
+    return destination
+#}}}
+
 class GlobalData(object) :#{{{
-    def __init__(self, configs) :#{{{
-        # TODO read in some params file
-        if GPU_AVAIL :
-            print 'Starting to copy data to /tmp'
-            system('cp /tigress/lthiele/boxes/hdf5_files/size_%d.hdf5 /tmp/'%SIZE)
-            print 'Finished copying data to /tmp, took %.2e seconds'%(time()-START_TIME) # 4.06e+02 seconds for 2048
-            self.data_path = '/tmp/size_%d.hdf5'%SIZE
-        else :
-            self.data_path = '/tigress/lthiele/boxes/hdf5_files/size_%d.hdf5'%SIZE # presumably move this data to local node /tmp
-        self.__output_path = '/home/lthiele/DM_to_electrons/Outputs/'
+    def __init__(self, *configs) :#{{{
+        configs = list(configs)
+        assert len(configs) > 0, 'You need to pass at least one config file.'
 
-        self.global_dtype = np.float32
-        self.block_shapes = {'training':   (SIZE, SIZE           , (1428*SIZE)/2048),
-                             'validation': (SIZE,(1368*SIZE)/2048, ( 620*SIZE)/2048),
-                             'testing':    (SIZE,( 680*SIZE)/2048, ( 620*SIZE)/2048),
-                            }
-        self.box_size = 205.0 # Mpc
-        self.box_sidelength = SIZE
-        self.gas_sidelength = (32*SIZE)/2048
-        self.DM_sidelength  = (64*SIZE)/2048
-        # these must both be divisible by 2!!!
+        # merge config files
+        for ii in xrange(1, len(configs)) :
+            configs[0] = _merge(configs[ii], configs[0])
 
-        self.num_epochs = 10
-        self.samples = {
-            'training': 8192,
-            'validation': 256 if GPU_AVAIL else 32,
-            }
-        self.global_dtype = np.float32
+        # which box to work on
+        self.box_sidelength = configs[0]['box_sidelength']
+        self.gas_sidelength = (configs[0]['gas_sidelength']*self.box_sidelength)/2048
+        self.DM_sidelength  = (configs[0]['DM_sidelength']*self.box_sidelength)/2048
+        assert not self.gas_sidelength%2, 'Only even gas_sidelength is supported.'
+        assert not self.DM_sidelength%2,  'Only even DM_sidelength is supported.'
 
         # training hyperparameters
-        self.__eval_period = 128 # after how many steps the validation loss is evaluated
-        self.__loss_function = nn.MSELoss
-        self.__optimizer = torch.optim.Adam
-        self.__learning_rate = configs["learning_rate"]
-        self.__betas = (0.9, 0.999)
-        self.__eps = 1e-8
-        self.__weight_decay = 1e-4 # L2 regularization
-        self.__batch_size = (16*2048)/SIZE if GPU_AVAIL else (4*2048)/SIZE
-        self.__num_workers = 1 # don't put this larger than 1 for single hdf5 file! (o/wise input corrupted)
+        self.__eval_period   = configs[0]['eval_period']
+        self.__loss_function = _names[configs[0]['loss_function']]
+        self.__optimizer     = _names[configs[0]['optimizer']]
+        self.__learning_rate = configs[0]['learning_rate']
+        self.__betas         = configs[0]['betas']
+        self.__eps           = configs[0]['eps']
+        self.__weight_decay  = configs[0]['weight_decay']
+        self.__batch_size    = configs[0]['batch_size'] if GPU_AVAIL else 8
+        self.__num_workers   = configs[0]['num_workers']
+        assert self.__num_workers < 2, 'Currently, parallel reading of the input data is not implemented.'
+        self.Nsamples        = configs[0]['Nsamples']
+        self.__train_time    = configs[0]['train_time'] # minutes
+
+        # all outputs are going here
+        self.__output_path = configs[0]['output_path']
+
+        if GPU_AVAIL :
+            print 'Starting to copy data to /tmp'
+            system('cp /tigress/lthiele/boxes/hdf5_files/size_%d.hdf5 /tmp/'%self.box_sidelength)
+            print 'Finished copying data to /tmp, took %.2e seconds'%(time()-START_TIME) # 4.06e+02 sec for 2048, ~12 sec for 1024
+            self.data_path = '/tmp/size_%d.hdf5'%self.box_sidelength
+        else :
+            self.data_path = '/tigress/lthiele/boxes/hdf5_files/size_%d.hdf5'%self.box_sidelength
+
+        # Some hardcoded values
+        self.block_shapes = {'training':   (self.box_sidelength, self.box_sidelength           , (1428*self.box_sidelength)/2048),
+                             'validation': (self.box_sidelength,(1368*self.box_sidelength)/2048, ( 620*self.box_sidelength)/2048),
+                             'testing':    (self.box_sidelength,( 680*self.box_sidelength)/2048, ( 620*self.box_sidelength)/2048),
+                            }
+        self.box_size = 205.0 # Mpc
 
         # keep track of training
         self.training_steps = []
@@ -131,8 +191,7 @@ class GlobalData(object) :#{{{
         return not len(self.training_loss)%self.__eval_period
     #}}}
     def stop_training(self) :#{{{
-        # TODO
-        return (time()-START_TIME)/60. > MAX_TIME
+        return (time()-START_TIME)/60. > self.__train_time
     #}}}
     def save_network(self, name) :#{{{
         torch.save(self.net, self.__output_path+name)
@@ -144,12 +203,6 @@ class GlobalData(object) :#{{{
         else :
             self.net = torch.load(self.__output_path+name, map_location='cpu')
         self.net.eval()
-    #}}}
-    def clean(self) :#{{{
-        if GPU_AVAIL :
-            system('rm /tmp/size_%d.hdf5'%SIZE)
-        else :
-            pass
     #}}}
 #}}}
 
@@ -177,9 +230,9 @@ class InputData(Dataset) :#{{{
         self.zz_indices_rnd = None
     #}}}
     def generate_rnd_indices(self) :#{{{
-        self.xx_indices_rnd = np.random.randint(0, high=self.xlength, size=self.globdat.samples[self.mode])
-        self.yy_indices_rnd = np.random.randint(0, high=self.ylength, size=self.globdat.samples[self.mode])
-        self.zz_indices_rnd = np.random.randint(0, high=self.zlength, size=self.globdat.samples[self.mode])
+        self.xx_indices_rnd = np.random.randint(0, high=self.xlength, size=self.globdat.Nsamples[self.mode])
+        self.yy_indices_rnd = np.random.randint(0, high=self.ylength, size=self.globdat.Nsamples[self.mode])
+        self.zz_indices_rnd = np.random.randint(0, high=self.zlength, size=self.globdat.Nsamples[self.mode])
     #}}}
     @staticmethod
     def __randomly_transform(arr1, arr2) :#{{{
@@ -252,7 +305,7 @@ class InputData(Dataset) :#{{{
         # add fake dimension
     #}}}
     def __len__(self) :#{{{
-        return self.globdat.samples[self.mode]
+        return self.globdat.Nsamples[self.mode]
     #}}}
 #}}}
 
@@ -285,25 +338,9 @@ class BasicLayer(nn.Module) :#{{{
         'activation_kw': {
             'inplace': False,
             },
+
+        'crop_output': False,
         }
-    #}}}
-    __names = {#{{{
-        'Conv': nn.Conv3d,
-        'ConvTranspose': nn.ConvTranspose3d,
-        'BatchNorm': nn.BatchNorm3d,
-        'ReLU': nn.ReLU,
-        }
-    #}}}
-    @staticmethod
-    def __merge(source, destination):#{{{
-        # overwrites field in destination if field exists in source, otherwise just merges
-        for key, value in source.items():
-            if isinstance(value, dict):
-                node = destination.setdefault(key, {})
-                BasicLayer.__merge(value, node)
-            else:
-                destination[key] = value
-        return destination
     #}}}
     @staticmethod
     def __crop_tensor(x) :#{{{
@@ -312,22 +349,26 @@ class BasicLayer(nn.Module) :#{{{
     #}}}
     def __init__(self, layer_dict) :#{{{
         super(BasicLayer, self).__init__()
-        self.__merged_dict = BasicLayer.__merge(
+        self.__merged_dict = _merge(
             layer_dict,
             copy.deepcopy(BasicLayer.__default_param)
             )
-        self.__crop_output = self.__merged_dict['crop_output'] if 'crop_output' in self.__merged_dict else False
 
         if self.__merged_dict['conv'] is not None :
-            self.__conv_fct = BasicLayer.__names[self.__merged_dict['conv']](
+            self.__conv_fct = _names[self.__merged_dict['conv']](
                 self.__merged_dict['inplane'], self.__merged_dict['outplane'],
                 **self.__merged_dict['conv_kw']
                 )
         else :
             self.__conv_fct = Identity()
 
+        if self.__merged_dict['crop_output'] :
+            self.__crop_fct = BasicLayer.__crop_tensor
+        else :
+            self.__crop_fct = Identity()
+
         if self.__merged_dict['batch_norm'] is not None :
-            self.__batch_norm_fct = BasicLayer.__names[self.__merged_dict['batch_norm']](
+            self.__batch_norm_fct = _names[self.__merged_dict['batch_norm']](
                 self.__merged_dict['outplane'],
                 **self.__merged_dict['batch_norm_kw']
                 )
@@ -335,17 +376,14 @@ class BasicLayer(nn.Module) :#{{{
             self.__batch_norm_fct = Identity()
         
         if self.__merged_dict['activation'] is not None :
-            self.__activation_fct = BasicLayer.__names[self.__merged_dict['activation']](
+            self.__activation_fct = _names[self.__merged_dict['activation']](
                 **self.__merged_dict['activation_kw']
                 )
         else :
             self.__activation_fct = Identity()
     #}}}
     def forward(self, x) :#{{{
-        if self.__crop_output : 
-            x = self.__activation_fct(self.__batch_norm_fct(BasicLayer.__crop_tensor(self.__conv_fct(x))))
-        else :
-            x = self.__activation_fct(self.__batch_norm_fct(self.__conv_fct(x)))
+        x = self.__activation_fct(self.__batch_norm_fct(self.__crop_fct(self.__conv_fct(x))))
         return x
     #}}}
 #}}}
@@ -419,7 +457,7 @@ class Mesh(object) :#{{{
         else :
             self.mesh = ArrayMesh(
                 self.arr,
-                BoxSize=(self.globdat.box_size/self.globdat.global_dtype(self.globdat.box_sidelength))*self.globdat.global_dtype(self.arr.shape)
+                BoxSize=(self.globdat.box_size/float(self.globdat.box_sidelength))*float(self.arr.shape)
                 )
     #}}}
     def compute_powerspectrum(self) :#{{{
@@ -519,15 +557,10 @@ class Analysis(object) :#{{{
 
 
 # OUTPUT TESTING
-if True :
-    NETWOR_NR = 2
-    CONFIG_NR = 1
+if ARGS.mode=='valid' :#{{{
 
-    with open('/home/lthiele/DM_to_electrons/Configs/config_%d.json'%CONFIG_NR) as f :
-        configs = json.load(f)
-
-    globdat = GlobalData(configs)
-    globdat.load_network('trained_network_%d_%d.pt'%(NETWOR_NR,CONFIG_NR))
+    globdat = GlobalData(*CONFIGS)
+    globdat.load_network(ARGS.network)
     validation_set = InputData(globdat, 'validation')
     validation_set.generate_rnd_indices()
     validation_loader = globdat.data_loader(validation_set)
@@ -591,36 +624,20 @@ if True :
         plt.suptitle('Network: %d, Configs: %d'%(NETWOR_NR,CONFIG_NR), family='monospace')
         plt.savefig('./Outputs/comparison_target_predicted_%d_%d_pg%d.pdf'%(NETWOR_NR,CONFIG_NR,t))
         plt.cla()
-
-
-
-
-#            for ii in xrange(4) :
-#                fig, ax = plt.subplots(ncols=3)
-#                ax[0].matshow(orig[ii,0,18,:,:].numpy())
-#                ax[1].matshow(targ[ii,0,10,:,:].numpy())
-#                ax[2].matshow(pred[ii,0,10,:,:].numpy())
-#                ax[0].set_title('Original')
-#                ax[1].set_title('Target')
-#                ax[2].set_title('Prediction')
-#                plt.show()
+#}}}
 
 # TRAINING
-if False :
-    NETWOR_NR = int(sys.argv[1])
-    CONFIG_NR = int(sys.argv[2])
+if ARGS.mode=='train' :#{{{
 
-    with open('/home/lthiele/DM_to_electrons/Configs/config_%d.json'%CONFIG_NR) as f :
-        configs = json.load(f)
+    globdat = GlobalData(*CONFIGS)
 
-    globdat = GlobalData(configs)
-
-    globdat.net = Network(import_module('network_%d'%NETWOR_NR).this_network)
+    globdat.net = Network(import_module(ARGS.network).this_network)
     if GPU_AVAIL :
         globdat.net.cuda()
 
-# TODO
-    summary(globdat.net, (1, 32, 32, 32))
+    if ARGS.verbose :
+        print 'Summary of %s'%ARGS.network
+        summary(globdat.net, (1, globdat.DM_sidelength, globdat.DM_sidelength, globdat.DM_sidelength))
 
     loss_function = globdat.loss_function()
     optimizer = globdat.optimizer()
@@ -653,6 +670,10 @@ if False :
                         ),
                     torch.autograd.Variable(data[1], requires_grad=False)
                     )
+            
+            if ARGS.verbose :
+                print '\ttraining loss : %.3e'%loss.item()
+
             globdat.update_training_loss(loss.item())
             loss.backward()
             optimizer.step()
@@ -686,3 +707,4 @@ if False :
 
         globdat.save_loss('loss_%d_%d.npz'%(NETWOR_NR,CONFIG_NR))
         globdat.save_network('trained_network_%d_%d.pt'%(NETWOR_NR,CONFIG_NR))
+#}}}

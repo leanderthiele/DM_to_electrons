@@ -3,7 +3,8 @@ import collections
 import copy
 from importlib import import_module
 
-DIM = 32 # current DM box size
+DIM_IN = 32 # current DM box size
+DIM_OUT = 16 # current gas box size
 
 # First determine all the plane coordinates
 HORI = 0.75 # units
@@ -208,7 +209,7 @@ def draw_network(index) :#{{{
     xx = 0
 
     level_states = []
-    level_states.append(LayerMode(1, DIM)) # input size
+    level_states.append(LayerMode(1, DIM_IN)) # input size
     l = Layer(Point(0,0), level_states[0])
     l.add_text(r'\textbf{Input}')
     l.draw()
@@ -271,6 +272,8 @@ def draw_network(index) :#{{{
             a.draw()
             l = Layer(Point(xx*HORI, ii*VERT), level_states[ii])
             if ii == 0 and jj == len(this_network['Level_0']['out'])-1 :
+                assert l.mode.dim == DIM_OUT
+                assert l.mode.Nchannels == 1
                 l.add_text(r'\textbf{Output}')
             l.draw()
             xx += 1

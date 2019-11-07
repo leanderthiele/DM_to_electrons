@@ -1,3 +1,3 @@
 this_config = {
-	'learning_rate': 1e-6
+    'weight_decay': 1e-6,
 }

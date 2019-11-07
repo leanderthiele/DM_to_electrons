@@ -43,6 +43,15 @@ parser.add_argument(
     '-v', '--verbose',
     action = 'store_true',
     )
+parser.add_argument(
+    '-p', '--parallel',
+    action = 'store_true',
+    )
+parser.add_argument(
+    '-o', '--output',
+    nargs='?',
+    required = True,
+    )
 ARGS = parser.parse_args()
 assert ARGS.mode=='train' or ARGS.mode=='valid', 'Only train and valid implemented so far, passed %s.'%ARGS.mode
 #}}}
@@ -62,10 +71,12 @@ START_TIME = time()
 GPU_AVAIL = torch.cuda.is_available() # if TRUE, we're on a computing node, otherwise on head node
 if GPU_AVAIL :
     print 'Found %d GPUs.'%torch.cuda.device_count()
-    torch.set_num_threads(28)
+    torch.set_num_threads(4)
+    DEVICE = torch.device('cuda:0')
 else :
     print 'Could not find GPU.'
     torch.set_num_threads(2)
+    DEVICE = torch.device('cpu')
 #}}}
 
 """
@@ -79,7 +90,10 @@ _names = {#{{{
     'BatchNorm': nn.BatchNorm3d,
     'ReLU': nn.ReLU,
     'MSELoss': nn.MSELoss,
+    'L1Loss': nn.L1Loss,
     'Adam': torch.optim.Adam,
+    'ReduceLROnPlateau': torch.optim.lr_scheduler.ReduceLROnPlateau,
+    'None': None,
     }
 #}}}
 def _merge(source, destination):#{{{
@@ -102,6 +116,10 @@ class GlobalData(object) :#{{{
         for ii in xrange(1, len(configs)) :
             configs[0] = _merge(configs[ii], configs[0])
 
+        if ARGS.verbose :
+            print 'Using the following configuration :'
+            print configs[0]
+
         # which box to work on
         self.box_sidelength = configs[0]['box_sidelength']
         self.gas_sidelength = (configs[0]['gas_sidelength']*self.box_sidelength)/2048
@@ -110,18 +128,20 @@ class GlobalData(object) :#{{{
         assert not self.DM_sidelength%2,  'Only even DM_sidelength is supported.'
 
         # training hyperparameters
-        self.__eval_period   = configs[0]['eval_period']
-        self.__loss_function = _names[configs[0]['loss_function']]
-        self.__optimizer     = _names[configs[0]['optimizer']]
-        self.__learning_rate = configs[0]['learning_rate']
-        self.__betas         = configs[0]['betas']
-        self.__eps           = configs[0]['eps']
-        self.__weight_decay  = configs[0]['weight_decay']
-        self.__batch_size    = configs[0]['batch_size'] if GPU_AVAIL else 8
-        self.__num_workers   = configs[0]['num_workers']
-        assert self.__num_workers < 2, 'Currently, parallel reading of the input data is not implemented.'
-        self.Nsamples        = configs[0]['Nsamples']
-        self.__train_time    = configs[0]['train_time'] # minutes
+        self.__loss_function    = _names[configs[0]['loss_function']]
+        self.__loss_function_kw = configs[0]['loss_function_%s_kw'%configs[0]['loss_function']]
+
+        self.__optimizer        = _names[configs[0]['optimizer']]
+        self.__optimizer_kw     = configs[0]['optimizer_%s_kw'%configs[0]['optimizer']]
+
+        self.Nsamples           = configs[0]['Nsamples']
+        self.__train_time       = configs[0]['train_time'] # minutes
+
+        self.__data_loader_kw   = configs[0]['data_loader_kw']
+
+        self.__lr_scheduler     = _names[configs[0]['lr_scheduler']]
+        if self.__lr_scheduler is not None :
+            self.__lr_scheduler_kw = configs[0]['lr_scheduler_%s_kw'%configs[0]['lr_scheduler']]
 
         # all outputs are going here
         self.__output_path = configs[0]['output_path']
@@ -156,18 +176,22 @@ class GlobalData(object) :#{{{
     def optimizer(self) :#{{{
         return self.__optimizer(
             params = self.net.parameters(),
-            lr = self.__learning_rate,
-            betas = self.__betas,
-            eps = self.__eps,
-            weight_decay = self.__weight_decay
+            **self.__optimizer_kw
             )
+    #}}}
+    def lr_scheduler(self, optimizer) :#{{{
+        if self.__lr_scheduler is not None :
+            return self.__lr_scheduler(
+                optimizer,
+                **self.__lr_scheduler_kw
+                )
+        else :
+            return None
     #}}}
     def data_loader(self, data) :#{{{
         return DataLoader(
             data,
-            batch_size = self.__batch_size,
-            num_workers = self.__num_workers,
-            shuffle = False
+            **self.__data_loader_kw
             )
     #}}}
     def update_training_loss(self, this_loss) :#{{{
@@ -187,21 +211,16 @@ class GlobalData(object) :#{{{
             validation_loss = self.validation_loss,
             )
     #}}}
-    def eval(self) :#{{{
-        return not len(self.training_loss)%self.__eval_period
-    #}}}
     def stop_training(self) :#{{{
         return (time()-START_TIME)/60. > self.__train_time
     #}}}
     def save_network(self, name) :#{{{
-        torch.save(self.net, self.__output_path+name)
+        torch.save(self.net.state_dict(), self.__output_path+name)
     #}}}
     def load_network(self, name) :#{{{
-        if GPU_AVAIL :
-            self.net = torch.load(self.__output_path+name)
-            self.net.cuda()
-        else :
-            self.net = torch.load(self.__output_path+name, map_location='cpu')
+        # need to initialize network first
+        self.net.load_state_dict(torch.load(self.__output_path+name, map_location='cuda:0' if GPU_AVAIL else 'cpu'))
+        self.net.to(DEVICE)
         self.net.eval()
     #}}}
 #}}}
@@ -553,12 +572,14 @@ class Analysis(object) :#{{{
     #}}}
 #}}}
 
-
-# OUTPUT TESTING
+# OUTPUT VALIDATION
 if ARGS.mode=='valid' :#{{{
 
     globdat = GlobalData(*CONFIGS)
-    globdat.load_network(ARGS.network)
+
+    globdat.net = Network(import_module(ARGS.network).this_network)
+
+    globdat.load_network('trained_network_%s.pt'%ARGS.output)
     validation_set = InputData(globdat, 'validation')
     validation_set.generate_rnd_indices()
     validation_loader = globdat.data_loader(validation_set)
@@ -592,9 +613,21 @@ if ARGS.mode=='valid' :#{{{
             fig.add_subplot(ax_targ)
             fig.add_subplot(ax_pred)
 
-            ax_orig.matshow(orig[ii,0,plane_DM,:,:].numpy(), extent=(0, globdat.DM_sidelength, 0, globdat.DM_sidelength))
-            ax_targ.matshow(targ[ii,0,plane_gas,:,:].numpy())
-            ax_pred.matshow(pred[ii,0,plane_gas,:,:].numpy())
+            vminmax = 3 # standard deviations
+
+            ax_orig.matshow(
+                orig[ii,0,plane_DM,:,:].numpy(),
+                extent=(0, globdat.DM_sidelength, 0, globdat.DM_sidelength),
+                vmin = -vminmax, vmax = vminmax,
+                )
+            ax_targ.matshow(
+                targ[ii,0,plane_gas,:,:].numpy(),
+                vmin = -vminmax, vmax = vminmax,
+                )
+            ax_pred.matshow(
+                pred[ii,0,plane_gas,:,:].numpy(),
+                vmin = -vminmax, vmax = vminmax,
+                )
 
             rect = Rectangle(
                 (
@@ -619,8 +652,9 @@ if ARGS.mode=='valid' :#{{{
             ax_targ.set_ylabel('Target')
             ax_pred.set_ylabel('Prediction')
 
-        plt.suptitle('Network: %d, Configs: %d'%(NETWOR_NR,CONFIG_NR), family='monospace')
-        plt.savefig('./Outputs/comparison_target_predicted_%d_%d_pg%d.pdf'%(NETWOR_NR,CONFIG_NR,t))
+        plt.show()
+        plt.suptitle('Output: %s'%ARGS.output, family='monospace')
+        plt.savefig('./Outputs/comparison_target_predicted_%s_pg%d.pdf'%(ARGS.output,t))
         plt.cla()
 #}}}
 
@@ -630,79 +664,73 @@ if ARGS.mode=='train' :#{{{
     globdat = GlobalData(*CONFIGS)
 
     globdat.net = Network(import_module(ARGS.network).this_network)
-    if GPU_AVAIL :
-        globdat.net.cuda()
-
+    if ARGS.parallel :
+        if ARGS.verbose :
+            print 'Putting network in parallel mode.'
+        globdat.net = nn.DataParallel(globdat.net)
+    globdat.net.to(DEVICE)
     if ARGS.verbose :
         print 'Summary of %s'%ARGS.network
         summary(globdat.net, (1, globdat.DM_sidelength, globdat.DM_sidelength, globdat.DM_sidelength))
 
     loss_function = globdat.loss_function()
     optimizer = globdat.optimizer()
+    lr_scheduler = globdat.lr_scheduler(optimizer)
 
     training_set   = InputData(globdat, 'training')
     validation_set = InputData(globdat, 'validation')
 
+    # keep the validation data always the same
+    # (reduces noise in the output and makes diagnostics easier)
+    validation_set.generate_rnd_indices()
+    validation_loader = globdat.data_loader(validation_set)
+
     while True : # train until time is up
 
         training_set.generate_rnd_indices()
-        validation_set.generate_rnd_indices()
-        training_loader   = globdat.data_loader(training_set)
-        validation_loader = globdat.data_loader(validation_set)
+        training_loader = globdat.data_loader(training_set)
 
         for t, data in enumerate(training_loader) :
 
             globdat.net.train()
             optimizer.zero_grad()
-            if GPU_AVAIL :
-                loss = loss_function(
-                    globdat.net(
-                        torch.autograd.Variable(data[0], requires_grad=False).cuda()
-                        ),
-                    torch.autograd.Variable(data[1], requires_grad=False).cuda()
-                    )
-            else :
-                loss = loss_function(
-                    globdat.net(
-                        torch.autograd.Variable(data[0], requires_grad=False)
-                        ),
-                    torch.autograd.Variable(data[1], requires_grad=False)
-                    )
+            loss = loss_function(
+                globdat.net(
+                    torch.autograd.Variable(data[0].to(DEVICE), requires_grad=False)
+                    ),
+                torch.autograd.Variable(data[1].to(DEVICE), requires_grad=False)
+                )
             
-            if ARGS.verbose :
+            if ARGS.verbose and not GPU_AVAIL :
                 print '\ttraining loss : %.3e'%loss.item()
 
             globdat.update_training_loss(loss.item())
             loss.backward()
             optimizer.step()
             
-            if globdat.eval() :
-                globdat.net.eval()
-                _loss = 0.0
-                for t_val, data_val in enumerate(validation_loader) :
-                    with torch.no_grad() :
-                        if GPU_AVAIL :
-                            _loss += loss_function(
-                                globdat.net(
-                                    torch.autograd.Variable(data[0], requires_grad=False).cuda()
-                                    ),
-                                torch.autograd.Variable(data[1], requires_grad=False).cuda()
-                                ).item()
-                        else :
-                            _loss += loss_function(
-                                globdat.net(
-                                    torch.autograd.Variable(data[0], requires_grad=False)
-                                    ),
-                                torch.autograd.Variable(data[1], requires_grad=False)
-                                ).item()
-                print 'validation loss : %.6e'%(_loss/(t_val+1.0))
-                globdat.update_validation_loss(_loss/(t_val+1.0))
-
             if globdat.stop_training() :
-                globdat.save_loss('loss_%d_%d.npz'%(NETWOR_NR,CONFIG_NR))
-                globdat.save_network('trained_network_%d_%d.pt'%(NETWOR_NR,CONFIG_NR))
+                globdat.save_loss('loss_%s.npz'%ARGS.output)
+                globdat.save_network('trained_network_%s.pt'%ARGS.output)
                 sys.exit(0)
 
-        globdat.save_loss('loss_%d_%d.npz'%(NETWOR_NR,CONFIG_NR))
-        globdat.save_network('trained_network_%d_%d.pt'%(NETWOR_NR,CONFIG_NR))
+        globdat.net.eval()
+        _loss = 0.0
+        for t_val, data_val in enumerate(validation_loader) :
+            with torch.no_grad() :
+                _loss += loss_function(
+                    globdat.net(
+                        torch.autograd.Variable(data[0], requires_grad=False).to(DEVICE)
+                        ),
+                    torch.autograd.Variable(data[1], requires_grad=False).to(DEVICE)
+                    ).item()
+
+        if ARGS.verbose :
+            print 'validation loss : %.6e'%(_loss/(t_val+1.0))
+        globdat.update_validation_loss(_loss/(t_val+1.0))
+
+        if lr_scheduler is not None :
+            lr_scheduler.step(_loss)
+
+        globdat.save_loss('loss_%s.npz'%ARGS.output)
+        globdat.save_network('trained_network_%s.pt'%ARGS.output)
 #}}}

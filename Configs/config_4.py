@@ -1,3 +1,3 @@
 this_config = {
-	'learning_rate': 1e-7
+    'lr_scheduler': 'ReduceLROnPlateau',
 }

@@ -383,6 +383,7 @@ def draw_network(index) :#{{{
 index = 0
 while True :
     try :
+        print index
         draw_network(index)
         index += 1
     except ImportError :

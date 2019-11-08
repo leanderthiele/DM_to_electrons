@@ -19,70 +19,85 @@ from matplotlib.patches import Rectangle
 
 import argparse
 
-sys.path.append('/home/lthiele/DM_to_electrons/Networks')
-sys.path.append('/home/lthiele/DM_to_electrons/Configs')
-
-# parse the command line#{{{
-parser = argparse.ArgumentParser(description='ArgumentParser for training.py')
-parser.add_argument(
-    '-n', '--network',
-    nargs='?',
-    required = True,
-    )
-parser.add_argument(
-    '-c', '--config',
-    nargs = '+',
-    required = True,
-    )
-parser.add_argument(
-    '-m', '--mode',
-    nargs = '?',
-    required = True,
-    )
-parser.add_argument(
-    '-v', '--verbose',
-    action = 'store_true',
-    )
-parser.add_argument(
-    '-p', '--parallel',
-    action = 'store_true',
-    )
-parser.add_argument(
-    '-o', '--output',
-    nargs='?',
-    required = True,
-    )
-ARGS = parser.parse_args()
-assert ARGS.mode=='train' or ARGS.mode=='valid', 'Only train and valid implemented so far, passed %s.'%ARGS.mode
-#}}}
-
-# load config files#{{{
-CONFIGS = []
-for c in ARGS.config :
-    CONFIGS.append(import_module(c).this_config)
-if ARGS.verbose :
-    for ii in xrange(len(ARGS.config)) :
-        print '%s :'%ARGS.config[ii]
-        print CONFIGS[ii]
-#}}}
-
-# Initialize global variables#{{{
-START_TIME = time()
-GPU_AVAIL = torch.cuda.is_available() # if TRUE, we're on a computing node, otherwise on head node
-if GPU_AVAIL :
-    print 'Found %d GPUs.'%torch.cuda.device_count()
-    torch.set_num_threads(4)
-    DEVICE = torch.device('cuda:0')
-else :
-    print 'Could not find GPU.'
-    torch.set_num_threads(2)
-    DEVICE = torch.device('cpu')
-#}}}
-
 """
 TODO
 write code for testing
 """
+
+class _ArgParser(object) :#{{{
+    def __init__(self) :#{{{
+        self.__parser = argparse.ArgumentParser(
+            description='Code to train on DM only sims and hydro sims to \
+                         learn mapping between DM and electron pressure.'
+            )
+
+        # define command line options
+        self.__parser.add_argument(
+            '-m', '--mode',
+            nargs = '?',
+            required = True,
+            help = 'Currently either train or valid.',
+            )
+        self.__parser.add_argument(
+            '-n', '--network',
+            nargs = '?',
+            required = True,
+            help = 'Name of the network architecture to be used.',
+            )
+        self.__parser.add_argument(
+            '-c', '--config',
+            nargs = '+',
+            required = True,
+            help = 'Any number of config files. Later configs overwrite earlier ones. \
+                    For example, if passed --config c1 c2, in case of conflict \
+                    the entry in c2 will be taken.',
+            )
+        self.__parser.add_argument(
+            '-s', '--scaling',
+            nargs = '?',
+            required = True,
+            help = 'Scaling of the target, currently either log or linear.'
+            )
+        self.__parser.add_argument(
+            '-o', '--output',
+            nargs = '?',
+            required = True,
+            help = 'Identifier of output files (loss and trained_network).'
+            )
+        self.__parser.add_argument(
+            '-v', '--verbose',
+            action = 'store_true',
+            help = 'If you want some diagnostic outputs.',
+            )
+        self.__parser.add_argument(
+            '-p', '--parallel',
+            action = 'store_true',
+            help = 'If several GPUs are available.',
+            )
+        self.__parser.add_argument(
+            '-npath', '--network_path',
+            nargs = '?',
+            default='/home/lthiele/DM_to_electrons/Networks',
+            help = 'Path where the network architectures are stored.',
+            )
+        self.__parser.add_argument(
+            '-cpath', '--config_path',
+            nargs = '?',
+            default='/home/lthiele/DM_to_electrons/Configs',
+            help = 'Path where the configuration files are stored.',
+            )
+        
+        # parse now
+        self.__args = self.__parser.parse_args()
+
+        # consistency checks
+        assert self.__args.mode=='train' or self.__args.mode=='valid', 'Only train and valid implemented so far, passed %s.'%self.__args.mode
+        assert self.__args.scaling=='log' or self.__args.mode=='linear', 'Only log and linear scaling implemented so far, passed %s.'%self.__args.scaling
+    #}}}
+    def __getattr__(self, name) :#{{{
+        return self.__args.__getattribute__(name)
+    #}}}
+#}}}
 
 _names = {#{{{
     'Conv': nn.Conv3d,
@@ -149,11 +164,11 @@ class GlobalData(object) :#{{{
 
         if GPU_AVAIL :
             print 'Starting to copy data to /tmp'
-            system('cp %ssize_%d.hdf5 /tmp/'%(self.__input_path, self.box_sidelength))
+            system('cp %s%s/size_%d.hdf5 /tmp/'%(self.__input_path, ARGS.scaling, self.box_sidelength))
             print 'Finished copying data to /tmp, took %.2e seconds'%(time()-START_TIME) # 4.06e+02 sec for 2048, ~12 sec for 1024
             self.data_path = '/tmp/size_%d.hdf5'%self.box_sidelength
         else :
-            self.data_path = '%ssize_%d.hdf5'%(self.__input_path, self.box_sidelength)
+            self.data_path = '%s%s/size_%d.hdf5'%(self.__input_path, ARGS.scaling, self.box_sidelength)
 
         # Some hardcoded values
         self.block_shapes = {'training':   (self.box_sidelength, self.box_sidelength           , (1428*self.box_sidelength)/2048),
@@ -573,165 +588,207 @@ class Analysis(object) :#{{{
     #}}}
 #}}}
 
-# OUTPUT VALIDATION
-if ARGS.mode=='valid' :#{{{
+if __name__ == '__main__' :
+    # set global variables#{{{
+    global ARGS
+    global START_TIME
+    global CONFIGS
+    global GPU_AVAIL
+    global DEVICE
 
-    globdat = GlobalData(*CONFIGS)
-
-    globdat.net = Network(import_module(ARGS.network).this_network)
-
-    globdat.load_network('trained_network_%s.pt'%ARGS.output)
-    validation_set = InputData(globdat, 'validation')
-    validation_set.generate_rnd_indices()
-    validation_loader = globdat.data_loader(validation_set)
-
-    NPAGES = 4
-    for t, data in enumerate(validation_loader) :
-        if t == NPAGES : break
-
-        with torch.no_grad() :
-            targ = copy.deepcopy(data[1])
-            orig = copy.deepcopy(data[0])
-            pred = globdat.net(
-                torch.autograd.Variable(data[0], requires_grad=False)
-                )
-        
-        NPlots = 8
-        fig = plt.figure(figsize=(8.5, 11.0))
-        gs0 = gs.GridSpec(NPlots/2, 2, figure=fig, wspace = 0.2)
-        for ii in xrange(NPlots) :
-            plane_gas = np.random.randint(0, high=globdat.gas_sidelength)
-            plane_DM  = plane_gas + (globdat.DM_sidelength-globdat.gas_sidelength)/2
-
-            gs00 = gs.GridSpecFromSubplotSpec(
-                2, 3, subplot_spec=gs0[ii%(NPlots/2), ii/(NPlots/2)],
-                wspace = 0.1
-                )
-            ax_orig = plt.subplot(gs00[:,:2])
-            ax_targ = plt.subplot(gs00[:1,-1])
-            ax_pred = plt.subplot(gs00[1:,-1])
-            fig.add_subplot(ax_orig)
-            fig.add_subplot(ax_targ)
-            fig.add_subplot(ax_pred)
-
-            vminmax = 3 # standard deviations
-
-            ax_orig.matshow(
-                orig[ii,0,plane_DM,:,:].numpy(),
-                extent=(0, globdat.DM_sidelength, 0, globdat.DM_sidelength),
-                vmin = -vminmax, vmax = vminmax,
-                )
-            ax_targ.matshow(
-                targ[ii,0,plane_gas,:,:].numpy(),
-                vmin = -vminmax, vmax = vminmax,
-                )
-            ax_pred.matshow(
-                pred[ii,0,plane_gas,:,:].numpy(),
-                vmin = -vminmax, vmax = vminmax,
-                )
-
-            rect = Rectangle(
-                (
-                    (globdat.DM_sidelength-globdat.gas_sidelength)/2,
-                    (globdat.DM_sidelength-globdat.gas_sidelength)/2,
-                ),
-                width=globdat.gas_sidelength, height=globdat.gas_sidelength,
-                axes = ax_orig,
-                edgecolor = 'red',
-                fill = False,
-                )
-            ax_orig.add_patch(rect)
-
-            ax_orig.set_xticks([])
-            ax_targ.set_xticks([])
-            ax_pred.set_xticks([])
-            ax_orig.set_yticks([])
-            ax_targ.set_yticks([])
-            ax_pred.set_yticks([])
-
-            ax_orig.set_ylabel('Input DM field')
-            ax_targ.set_ylabel('Target')
-            ax_pred.set_ylabel('Prediction')
-
-        plt.show()
-        plt.suptitle('Output: %s'%ARGS.output, family='monospace')
-        plt.savefig('./Outputs/comparison_target_predicted_%s_pg%d.pdf'%(ARGS.output,t))
-        plt.cla()
-#}}}
-
-# TRAINING
-if ARGS.mode=='train' :#{{{
-
-    globdat = GlobalData(*CONFIGS)
-
-    globdat.net = Network(import_module(ARGS.network).this_network)
-    if ARGS.parallel :
-        if ARGS.verbose :
-            print 'Putting network in parallel mode.'
-        globdat.net = nn.DataParallel(globdat.net)
-    globdat.net.to(DEVICE)
+    START_TIME = time()
+    ARGS = _ArgParser()
+    sys.path.append(ARGS.network_path)
+    sys.path.append(ARGS.config_path)
+    CONFIGS = []
+    for c in ARGS.config :
+        CONFIGS.append(import_module(c).this_config)
     if ARGS.verbose :
-        print 'Summary of %s'%ARGS.network
-        summary(globdat.net, (1, globdat.DM_sidelength, globdat.DM_sidelength, globdat.DM_sidelength))
+        for ii in xrange(len(ARGS.config)) :
+            print '%s :'%ARGS.config[ii]
+            print CONFIGS[ii]
+    GPU_AVAIL = torch.cuda.is_available()
+    if GPU_AVAIL :
+        print 'Found %d GPUs.'%torch.cuda.device_count()
+        torch.set_num_threads(4)
+        DEVICE = torch.device('cuda:0')
+    else :
+        print 'Could not find GPU.'
+        torch.set_num_threads(2)
+        DEVICE = torch.device('cpu')
+    #}}}
 
-    loss_function = globdat.loss_function()
-    optimizer = globdat.optimizer()
-    lr_scheduler = globdat.lr_scheduler(optimizer)
+    # OUTPUT VALIDATION
+    if ARGS.mode=='valid' :#{{{
 
-    training_set   = InputData(globdat, 'training')
-    validation_set = InputData(globdat, 'validation')
+        globdat = GlobalData(*CONFIGS)
 
-    # keep the validation data always the same
-    # (reduces noise in the output and makes diagnostics easier)
-    validation_set.generate_rnd_indices()
-    validation_loader = globdat.data_loader(validation_set)
+        globdat.net = Network(import_module(ARGS.network).this_network)
 
-    while True : # train until time is up
+        globdat.load_network('trained_network_%s.pt'%ARGS.output)
+        validation_set = InputData(globdat, 'validation')
+        validation_set.generate_rnd_indices()
+        validation_loader = globdat.data_loader(validation_set)
 
-        training_set.generate_rnd_indices()
-        training_loader = globdat.data_loader(training_set)
+        NPAGES = 4
+        for t, data in enumerate(validation_loader) :
+            if t == NPAGES : break
 
-        for t, data in enumerate(training_loader) :
-
-            globdat.net.train()
-            optimizer.zero_grad()
-            loss = loss_function(
-                globdat.net(
-                    torch.autograd.Variable(data[0].to(DEVICE), requires_grad=False)
-                    ),
-                torch.autograd.Variable(data[1].to(DEVICE), requires_grad=False)
-                )
-            
-            if ARGS.verbose and not GPU_AVAIL :
-                print '\ttraining loss : %.3e'%loss.item()
-
-            globdat.update_training_loss(loss.item())
-            loss.backward()
-            optimizer.step()
-            
-            if globdat.stop_training() :
-                globdat.save_loss('loss_%s.npz'%ARGS.output)
-                globdat.save_network('trained_network_%s.pt'%ARGS.output)
-                sys.exit(0)
-
-        globdat.net.eval()
-        _loss = 0.0
-        for t_val, data_val in enumerate(validation_loader) :
             with torch.no_grad() :
-                _loss += loss_function(
-                    globdat.net(
-                        torch.autograd.Variable(data[0], requires_grad=False).to(DEVICE)
-                        ),
-                    torch.autograd.Variable(data[1], requires_grad=False).to(DEVICE)
-                    ).item()
+                targ = copy.deepcopy(data[1])
+                orig = copy.deepcopy(data[0])
+                pred = globdat.net(
+                    torch.autograd.Variable(data[0], requires_grad=False)
+                    )
+            
+            NPlots = 8
+            fig = plt.figure(figsize=(8.5, 11.0))
+            gs0 = gs.GridSpec(NPlots/2, 2, figure=fig, wspace = 0.2)
+            for ii in xrange(NPlots) :
+                if ARGS.scaling=='log' :
+                    plane_gas = np.random.randint(0, high=globdat.gas_sidelength)
+                    plane_DM  = plane_gas + (globdat.DM_sidelength-globdat.gas_sidelength)/2
 
+                gs00 = gs.GridSpecFromSubplotSpec(
+                    2, 3, subplot_spec=gs0[ii%(NPlots/2), ii/(NPlots/2)],
+                    wspace = 0.1
+                    )
+                ax_orig = plt.subplot(gs00[:,:2])
+                ax_targ = plt.subplot(gs00[:1,-1])
+                ax_pred = plt.subplot(gs00[1:,-1])
+                fig.add_subplot(ax_orig)
+                fig.add_subplot(ax_targ)
+                fig.add_subplot(ax_pred)
+
+                if ARGS.scaling=='log' :
+                    vminmax = 3 # standard deviations
+                    ax_orig.matshow(
+                        orig[ii,0,plane_DM,:,:].numpy(),
+                        extent=(0, globdat.DM_sidelength, 0, globdat.DM_sidelength),
+                        vmin = -vminmax, vmax = vminmax,
+                        )
+                    ax_targ.matshow(
+                        targ[ii,0,plane_gas,:,:].numpy(),
+                        vmin = -vminmax, vmax = vminmax,
+                        )
+                    ax_pred.matshow(
+                        pred[ii,0,plane_gas,:,:].numpy(),
+                        vmin = -vminmax, vmax = vminmax,
+                        )
+                elif ARGS.scaling=='linear' :
+                    ax_orig.matshow(
+                        np.log(np.sum(np.exp(orig[ii,0,:,:,:]), axis=0)),
+                        extent=(0, globdat.DM_sidelength, 0, globdat.DM_sidelength),
+                        )
+                    ax_targ.matshow(
+                        np.log(np.sum(targ[ii,0,:,:,:], axis=0)),
+                        )
+                    ax_pred.matshow(
+                        np.log(np.sum(pred[ii,0,:,:,:], axis=0)),
+                        )
+
+                rect = Rectangle(
+                    (
+                        (globdat.DM_sidelength-globdat.gas_sidelength)/2,
+                        (globdat.DM_sidelength-globdat.gas_sidelength)/2,
+                    ),
+                    width=globdat.gas_sidelength, height=globdat.gas_sidelength,
+                    axes = ax_orig,
+                    edgecolor = 'red',
+                    fill = False,
+                    )
+                ax_orig.add_patch(rect)
+
+                ax_orig.set_xticks([])
+                ax_targ.set_xticks([])
+                ax_pred.set_xticks([])
+                ax_orig.set_yticks([])
+                ax_targ.set_yticks([])
+                ax_pred.set_yticks([])
+
+                ax_orig.set_ylabel('Input DM field')
+                ax_targ.set_ylabel('Target')
+                ax_pred.set_ylabel('Prediction')
+
+            plt.show()
+            plt.suptitle('Output: %s, Scaling: %s'%(ARGS.output, ARGS.scaling), family='monospace')
+            plt.savefig('./Outputs/comparison_target_predicted_%s_pg%d.pdf'%(ARGS.output,t))
+            plt.cla()
+    #}}}
+
+    # TRAINING
+    if ARGS.mode=='train' :#{{{
+
+        globdat = GlobalData(*CONFIGS)
+
+        globdat.net = Network(import_module(ARGS.network).this_network)
+        if ARGS.parallel :
+            if ARGS.verbose :
+                print 'Putting network in parallel mode.'
+            globdat.net = nn.DataParallel(globdat.net)
+        globdat.net.to(DEVICE)
         if ARGS.verbose :
-            print 'validation loss : %.6e'%(_loss/(t_val+1.0))
-        globdat.update_validation_loss(_loss/(t_val+1.0))
+            print 'Summary of %s'%ARGS.network
+            summary(globdat.net, (1, globdat.DM_sidelength, globdat.DM_sidelength, globdat.DM_sidelength))
 
-        if lr_scheduler is not None :
-            lr_scheduler.step(_loss)
+        loss_function = globdat.loss_function()
+        optimizer = globdat.optimizer()
+        lr_scheduler = globdat.lr_scheduler(optimizer)
 
-        globdat.save_loss('loss_%s.npz'%ARGS.output)
-        globdat.save_network('trained_network_%s.pt'%ARGS.output)
-#}}}
+        training_set   = InputData(globdat, 'training')
+        validation_set = InputData(globdat, 'validation')
+
+        # keep the validation data always the same
+        # (reduces noise in the output and makes diagnostics easier)
+        validation_set.generate_rnd_indices()
+        validation_loader = globdat.data_loader(validation_set)
+
+        while True : # train until time is up
+
+            training_set.generate_rnd_indices()
+            training_loader = globdat.data_loader(training_set)
+
+            for t, data in enumerate(training_loader) :
+
+                globdat.net.train()
+                optimizer.zero_grad()
+                loss = loss_function(
+                    globdat.net(
+                        torch.autograd.Variable(data[0].to(DEVICE), requires_grad=False)
+                        ),
+                    torch.autograd.Variable(data[1].to(DEVICE), requires_grad=False)
+                    )
+                
+                if ARGS.verbose and not GPU_AVAIL :
+                    print '\ttraining loss : %.3e'%loss.item()
+
+                globdat.update_training_loss(loss.item())
+                loss.backward()
+                optimizer.step()
+                
+                if globdat.stop_training() :
+                    globdat.save_loss('loss_%s.npz'%ARGS.output)
+                    globdat.save_network('trained_network_%s.pt'%ARGS.output)
+                    sys.exit(0)
+
+            globdat.net.eval()
+            _loss = 0.0
+            for t_val, data_val in enumerate(validation_loader) :
+                with torch.no_grad() :
+                    _loss += loss_function(
+                        globdat.net(
+                            torch.autograd.Variable(data[0], requires_grad=False).to(DEVICE)
+                            ),
+                        torch.autograd.Variable(data[1], requires_grad=False).to(DEVICE)
+                        ).item()
+
+            if ARGS.verbose :
+                print 'validation loss : %.6e'%(_loss/(t_val+1.0))
+            globdat.update_validation_loss(_loss/(t_val+1.0))
+
+            if lr_scheduler is not None :
+                lr_scheduler.step(_loss)
+
+            globdat.save_loss('loss_%s.npz'%ARGS.output)
+            globdat.save_network('trained_network_%s.pt'%ARGS.output)
+    #}}}

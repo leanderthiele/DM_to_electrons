@@ -49,13 +49,13 @@ class ArrowMode(object) :#{{{
         if self.conv is 'Copy' :
             return in_layer
         elif self.conv is 'Conv' :
-            assert self.inplane == in_layer.Nchannels
+            assert self.inplane == in_layer.Nchannels, '%d vs %d'%(self.inplane, in_layer.Nchannels)
             return LayerMode(
                 self.outplane,
                 (in_layer.dim+2*self.padding-(self.kernel_size-1)-1+self.stride)/self.stride-int(self.crop_output)
                 )
         elif self.conv is 'ConvTranspose' :
-            assert self.inplane == in_layer.Nchannels
+            assert self.inplane == in_layer.Nchannels, '%d vs %d'%(self.inplane, in_layer.Nchannels)
             return LayerMode(
                 self.outplane,
                 (in_layer.dim-1)*self.stride-2*self.padding+(self.kernel_size-1)+1-int(self.crop_output)

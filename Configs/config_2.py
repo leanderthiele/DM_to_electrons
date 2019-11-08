@@ -1,3 +1,5 @@
 this_config = {
-    'batch_size': 4,
+    'data_loader_kw': {
+                        'batch_size': 32,
+                      },
 }

@@ -9,7 +9,7 @@ this_config = {
     'gas_sidelength': 32,
 
     # loss function
-    'loss_function': 'MSELoss',
+    'loss_function': 'L1Loss',
     'loss_function_MSELoss_kw': {
                                 },
     'loss_function_L1Loss_kw' : {
@@ -19,7 +19,7 @@ this_config = {
     # optimizer
     'optimizer': 'Adam',
     'optimizer_Adam_kw': {
-                            'lr': 1e-4,
+                            'lr': 1e-5,
                             'betas': (0.9, 0.999),
                             'eps': 1e-8,
                             'weight_decay': 0.0,
@@ -27,7 +27,7 @@ this_config = {
 
     # data loader
     'data_loader_kw': {
-                        'batch_size': 8,
+                        'batch_size': 16,
                         'num_workers': 1,
                         'shuffle': False,
                       },
@@ -35,7 +35,7 @@ this_config = {
     # describes individual epochs
     'Nsamples': {
                     'training': 8192,
-                    'validation': 256,
+                    'validation': 512,
                 },
 
     # learning rate scheduler
@@ -47,8 +47,8 @@ this_config = {
                                          },
 
 
-    'train_time': 2870.0, # minutes
+    'train_time': 710.0, # minutes
 
-    'input_path' : '/tigress/lthiele/boxes/hdf5_files/linear/'
-    'output_path': '/home/lthiele/DM_to_electrons/Outputs/',
+    'input_path' : '/tigress/lthiele/boxes/hdf5_files/',
+    'output_path': '/scratch/gpfs/lthiele/Outputs/',
 }

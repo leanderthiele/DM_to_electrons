@@ -5,7 +5,7 @@ this_config = {
     # they get rescaled for other box sizes
     # so that the physical cubes are always of
     # equal size
-    'DM_sidelength': 64,
+    'DM_sidelength' : 64,
     'gas_sidelength': 32,
 
     # loss function
@@ -49,5 +49,6 @@ this_config = {
 
     'train_time': 2870.0, # minutes
 
+    'input_path' : '/tigress/lthiele/boxes/hdf5_files/linear/'
     'output_path': '/home/lthiele/DM_to_electrons/Outputs/',
 }

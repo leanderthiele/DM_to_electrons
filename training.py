@@ -143,16 +143,17 @@ class GlobalData(object) :#{{{
         if self.__lr_scheduler is not None :
             self.__lr_scheduler_kw = configs[0]['lr_scheduler_%s_kw'%configs[0]['lr_scheduler']]
 
-        # all outputs are going here
+        # where to find and put data files
+        self.__input_path  = configs[0]['input_path']
         self.__output_path = configs[0]['output_path']
 
         if GPU_AVAIL :
             print 'Starting to copy data to /tmp'
-            system('cp /tigress/lthiele/boxes/hdf5_files/size_%d.hdf5 /tmp/'%self.box_sidelength)
+            system('cp %ssize_%d.hdf5 /tmp/'%(self.__input_path, self.box_sidelength))
             print 'Finished copying data to /tmp, took %.2e seconds'%(time()-START_TIME) # 4.06e+02 sec for 2048, ~12 sec for 1024
             self.data_path = '/tmp/size_%d.hdf5'%self.box_sidelength
         else :
-            self.data_path = '/tigress/lthiele/boxes/hdf5_files/size_%d.hdf5'%self.box_sidelength
+            self.data_path = '%ssize_%d.hdf5'%(self.__input_path, self.box_sidelength)
 
         # Some hardcoded values
         self.block_shapes = {'training':   (self.box_sidelength, self.box_sidelength           , (1428*self.box_sidelength)/2048),

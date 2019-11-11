@@ -1,2 +1,0 @@
-this_config = {
-}

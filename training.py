@@ -1,8 +1,7 @@
 import copy
-from time import time
+from time import time, clock
 from os import system
 import sys
-import json
 from importlib import import_module
 import numpy as np
 from nbodykit.lab import ArrayMesh, FFTPower
@@ -26,6 +25,9 @@ write code for testing
 
 class _ArgParser(object) :#{{{
     def __init__(self) :#{{{
+        _modes    = ['train', 'valid', ]
+        _scalings = ['log', 'linear', 'sqrt', 'cbrt', ]
+
         self.__parser = argparse.ArgumentParser(
             description='Code to train on DM only sims and hydro sims to \
                          learn mapping between DM and electron pressure.'
@@ -36,7 +38,7 @@ class _ArgParser(object) :#{{{
             '-m', '--mode',
             nargs = '?',
             required = True,
-            help = 'Currently either train or valid.',
+            help = 'Currently from %s.'%_modes,
             )
         self.__parser.add_argument(
             '-n', '--network',
@@ -56,7 +58,7 @@ class _ArgParser(object) :#{{{
             '-s', '--scaling',
             nargs = '?',
             required = True,
-            help = 'Scaling of the target, currently either log or linear.'
+            help = 'Scaling of the target, currently from %s.'%_scalings
             )
         self.__parser.add_argument(
             '-o', '--output',
@@ -91,8 +93,8 @@ class _ArgParser(object) :#{{{
         self.__args = self.__parser.parse_args()
 
         # consistency checks
-        assert self.__args.mode=='train' or self.__args.mode=='valid', 'Only train and valid implemented so far, passed %s.'%self.__args.mode
-        assert self.__args.scaling=='log' or self.__args.mode=='linear', 'Only log and linear scaling implemented so far, passed %s.'%self.__args.scaling
+        assert self.__args.mode    in _modes,    'Only %s modes implemented so far, passed %s.'%(_modes, self.__args.mode)
+        assert self.__args.scaling in _scalings, 'Only %s scalings implemented so far, passed %s.'%(_scalings, self.__args.scaling)
     #}}}
     def __getattr__(self, name) :#{{{
         return self.__args.__getattribute__(name)
@@ -153,6 +155,7 @@ class GlobalData(object) :#{{{
         self.__train_time       = configs[0]['train_time'] # minutes
 
         self.__data_loader_kw   = configs[0]['data_loader_kw']
+        self.num_workers = self.__data_loader_kw['num_workers'] if 'num_workers' in self.__data_loader_kw else 1
 
         self.__lr_scheduler     = _names[configs[0]['lr_scheduler']]
         if self.__lr_scheduler is not None :
@@ -252,9 +255,15 @@ class InputData(Dataset) :#{{{
         self.ylength = self.globdat.block_shapes[mode][1] - self.globdat.DM_sidelength
         self.zlength = self.globdat.block_shapes[mode][2] - self.globdat.DM_sidelength
 
-        self.file = h5py.File(self.globdat.data_path, 'r')
-        self.DM_dataset = self.file['DM/'+self.mode]
-        self.gas_dataset = self.file['gas/'+self.mode]
+        self.files = []
+        self.DM_datasets = []
+        self.gas_datasets = []
+        self.rnd_generators = []
+        for ii in xrange(self.globdat.num_workers) :
+            self.files.append(h5py.File(self.globdat.data_path, 'r'))
+            self.DM_datasets.append(self.files[-1]['DM/'+self.mode])
+            self.gas_datasets.append(self.files[-1]['gas/'+self.mode])
+            self.rnd_generators.append(np.random.RandomState(int(1e6*clock())+ii))
 
         # need these if we want to transform back
         self.DM_training_mean    = self.file['DM'].attrs['training_mean']
@@ -271,20 +280,24 @@ class InputData(Dataset) :#{{{
         self.yy_indices_rnd = np.random.randint(0, high=self.ylength, size=self.globdat.Nsamples[self.mode])
         self.zz_indices_rnd = np.random.randint(0, high=self.zlength, size=self.globdat.Nsamples[self.mode])
     #}}}
-    @staticmethod
-    def __randomly_transform(arr1, arr2) :#{{{
+    def __generate_rnd_index(self,  __this_ID) :
+        xx_rnd = self.rnd_generators[__this_ID].randint(0, high=self.xlength)
+        yy_rnd = self.rnd_generators[__this_ID].randint(0, high=self.ylength)
+        zz_rnd = self.rnd_generators[__this_ID].randint(0, high=self.zlength)
+        return xx_rnd, yy_rnd, zz_rnd
+    def __randomly_transform(self, arr1, arr2, __this_ID) :#{{{
         # reflections
-        if np.random.rand() < 0.5 :
+        if self.rnd_generators[__this_ID].random.rand() < 0.5 :
             arr1 = arr1[::-1,:,:]
             arr1 = arr1[::-1,:,:]
-        if np.random.rand() < 0.5 :
+        if self.rnd_generators[__this_ID].rand() < 0.5 :
             arr1 = arr1[:,::-1,:]
             arr2 = arr2[:,::-1,:]
-        if np.random.rand() < 0.5 :
+        if self.rnd_generators[__this_ID].rand() < 0.5 :
             arr1 = arr1[:,::-1]
             arr2 = arr2[:,::-1]
         # transpositions
-        prand = np.random.rand()
+        prand = self.rnd_generators[__this_ID].rand()
         if prand < 1./6. :
             arr1 = np.transpose(arr1, axes=(0,2,1))
             arr2 = np.transpose(arr2, axes=(0,2,1))
@@ -309,16 +322,16 @@ class InputData(Dataset) :#{{{
             index/(self.ylength*self.xlength)
             )
     #}}}
-    def getitem_deterministic(self, xx, yy, zz) :#{{{
+    def getitem_deterministic(self, xx, yy, zz, __this_ID) :#{{{
         assert xx < self.xlength
         assert yy < self.ylength
         assert zz < self.zlength
-        DM = self.DM_dataset[
+        DM = self.DM_datasets[__this_ID][
             xx : xx+self.globdat.DM_sidelength,
             yy : yy+self.globdat.DM_sidelength,
             zz : zz+self.globdat.DM_sidelength
             ]
-        gas = self.gas_dataset[
+        gas = self.gas_datasets[__this_ID][
             xx+(self.globdat.DM_sidelength-self.globdat.gas_sidelength)/2 : xx+(self.globdat.DM_sidelength+self.globdat.gas_sidelength)/2,
             yy+(self.globdat.DM_sidelength-self.globdat.gas_sidelength)/2 : yy+(self.globdat.DM_sidelength+self.globdat.gas_sidelength)/2,
             zz+(self.globdat.DM_sidelength-self.globdat.gas_sidelength)/2 : zz+(self.globdat.DM_sidelength+self.globdat.gas_sidelength)/2,
@@ -326,12 +339,19 @@ class InputData(Dataset) :#{{{
         return DM, gas
     #}}}
     def __getitem__(self, index) :#{{{
-        DM, gas = self.getitem_deterministic(
-            self.xx_indices_rnd[index],
-            self.yy_indices_rnd[index],
-            self.zz_indices_rnd[index]
-            )
-        DM, gas = InputData.__randomly_transform(DM, gas)
+        __this_ID = torch.utils.data.get_worker_info().id
+        if self.xx_indices_rnd is None or self.yy_indices_rnd is None or self.zz_indices_rnd is None :
+            DM, gas = self.getitem_deterministic(
+                *self.__generate_rnd_index(__this_ID), __this_ID = __this_ID
+                )
+        else : # useful to keep validation set manageable (reduce noise in validation loss)
+            DM, gas = self.getitem_deterministic(
+                self.xx_indices_rnd[index],
+                self.yy_indices_rnd[index],
+                self.zz_indices_rnd[index],
+                __this_ID
+                )
+        DM, gas = InputData.__randomly_transform(DM, gas, __this_ID)
         assert DM.shape[0]==DM.shape[1]==DM.shape[2]==self.globdat.DM_sidelength, DM.shape
         assert gas.shape[0]==gas.shape[1]==gas.shape[2]==self.globdat.gas_sidelength, gas.shape
         return torch.from_numpy(DM.copy()).unsqueeze(0), torch.from_numpy(gas.copy()).unsqueeze(0)
@@ -623,9 +643,9 @@ if __name__ == '__main__' :
 
         globdat = GlobalData(*CONFIGS)
 
-        globdat.net = Network(import_module(ARGS.network).this_network)
-
+        globdat.net = nn.DataParallel(Network(import_module(ARGS.network).this_network))
         globdat.load_network('trained_network_%s.pt'%ARGS.output)
+            
         validation_set = InputData(globdat, 'validation')
         validation_set.generate_rnd_indices()
         validation_loader = globdat.data_loader(validation_set)
@@ -645,9 +665,8 @@ if __name__ == '__main__' :
             fig = plt.figure(figsize=(8.5, 11.0))
             gs0 = gs.GridSpec(NPlots/2, 2, figure=fig, wspace = 0.2)
             for ii in xrange(NPlots) :
-                if ARGS.scaling=='log' :
-                    plane_gas = np.random.randint(0, high=globdat.gas_sidelength)
-                    plane_DM  = plane_gas + (globdat.DM_sidelength-globdat.gas_sidelength)/2
+                plane_gas = np.random.randint(0, high=globdat.gas_sidelength)
+                plane_DM  = plane_gas + (globdat.DM_sidelength-globdat.gas_sidelength)/2
 
                 gs00 = gs.GridSpecFromSubplotSpec(
                     2, 3, subplot_spec=gs0[ii%(NPlots/2), ii/(NPlots/2)],
@@ -660,32 +679,33 @@ if __name__ == '__main__' :
                 fig.add_subplot(ax_targ)
                 fig.add_subplot(ax_pred)
 
-                if ARGS.scaling=='log' :
+#                if ARGS.scaling=='log' :
+                if True :
                     vminmax = 3 # standard deviations
                     ax_orig.matshow(
                         orig[ii,0,plane_DM,:,:].numpy(),
                         extent=(0, globdat.DM_sidelength, 0, globdat.DM_sidelength),
-                        vmin = -vminmax, vmax = vminmax,
+#                        vmin = -vminmax, vmax = vminmax,
                         )
                     ax_targ.matshow(
                         targ[ii,0,plane_gas,:,:].numpy(),
-                        vmin = -vminmax, vmax = vminmax,
+#                        vmin = -vminmax, vmax = vminmax,
                         )
                     ax_pred.matshow(
                         pred[ii,0,plane_gas,:,:].numpy(),
-                        vmin = -vminmax, vmax = vminmax,
+#                        vmin = -vminmax, vmax = vminmax,
                         )
-                elif ARGS.scaling=='linear' :
-                    ax_orig.matshow(
-                        np.log(np.sum(np.exp(orig[ii,0,:,:,:]), axis=0)),
-                        extent=(0, globdat.DM_sidelength, 0, globdat.DM_sidelength),
-                        )
-                    ax_targ.matshow(
-                        np.log(np.sum(targ[ii,0,:,:,:], axis=0)),
-                        )
-                    ax_pred.matshow(
-                        np.log(np.sum(pred[ii,0,:,:,:], axis=0)),
-                        )
+#                elif ARGS.scaling=='linear' :
+#                    ax_orig.matshow(
+#                        np.log(np.sum(np.exp(orig[ii,0,:,:,:].numpy()), axis=0)),
+#                        extent=(0, globdat.DM_sidelength, 0, globdat.DM_sidelength),
+#                        )
+#                    ax_targ.matshow(
+#                        np.log(np.sum(targ[ii,0,:,:,:].numpy(), axis=0)),
+#                        )
+#                    ax_pred.matshow(
+#                        np.log(np.sum(pred[ii,0,:,:,:].numpy(), axis=0)),
+#                        )
 
                 rect = Rectangle(
                     (
@@ -710,10 +730,10 @@ if __name__ == '__main__' :
                 ax_targ.set_ylabel('Target')
                 ax_pred.set_ylabel('Prediction')
 
-            plt.show()
             plt.suptitle('Output: %s, Scaling: %s'%(ARGS.output, ARGS.scaling), family='monospace')
-            plt.savefig('./Outputs/comparison_target_predicted_%s_pg%d.pdf'%(ARGS.output,t))
-            plt.cla()
+            plt.show()
+            #plt.savefig('./Outputs/comparison_target_predicted_%s_pg%d.pdf'%(ARGS.output,t))
+            #plt.cla()
     #}}}
 
     # TRAINING
@@ -722,10 +742,9 @@ if __name__ == '__main__' :
         globdat = GlobalData(*CONFIGS)
 
         globdat.net = Network(import_module(ARGS.network).this_network)
-        if ARGS.parallel :
-            if ARGS.verbose :
-                print 'Putting network in parallel mode.'
-            globdat.net = nn.DataParallel(globdat.net)
+        if ARGS.verbose :
+            print 'Putting network in parallel mode.'
+        globdat.net = nn.DataParallel(globdat.net)
         globdat.net.to(DEVICE)
         if ARGS.verbose :
             print 'Summary of %s'%ARGS.network
@@ -745,7 +764,6 @@ if __name__ == '__main__' :
 
         while True : # train until time is up
 
-            training_set.generate_rnd_indices()
             training_loader = globdat.data_loader(training_set)
 
             for t, data in enumerate(training_loader) :

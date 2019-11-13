@@ -28,7 +28,7 @@ this_config = {
     # data loader
     'data_loader_kw': {
                         'batch_size': 16,
-                        'num_workers': 1,
+                        'num_workers': 4,
                         'shuffle': False,
                       },
 

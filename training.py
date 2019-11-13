@@ -9,7 +9,7 @@ import h5py
 import torch
 from torch import nn
 from torch.utils.data.dataset import Dataset
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, get_worker_info
 from torchsummary import summary
 
 from matplotlib import pyplot as plt
@@ -21,6 +21,7 @@ import argparse
 """
 TODO
 write code for testing
+add support to load pre-trained model in train mode
 """
 
 class _ArgParser(object) :#{{{
@@ -65,6 +66,16 @@ class _ArgParser(object) :#{{{
             nargs = '?',
             required = True,
             help = 'Identifier of output files (loss and trained_network).'
+            )
+        self.__parser.add_argument(
+            '-pfid', '--powerspectrumfid',
+            nargs = '?',
+            help = 'File storing precomputed fiducial powerspectrum.'
+            )
+        self.__parser.add_argument(
+            '-ppred', '--powerspectrumpred',
+            nargs = '?',
+            help = 'File storing precomputed predicted powerspectrum.'
             )
         self.__parser.add_argument(
             '-v', '--verbose',
@@ -266,10 +277,10 @@ class InputData(Dataset) :#{{{
             self.rnd_generators.append(np.random.RandomState(int(1e6*clock())+ii))
 
         # need these if we want to transform back
-        self.DM_training_mean    = self.file['DM'].attrs['training_mean']
-        self.DM_training_stddev  = self.file['DM'].attrs['training_stddev']
-        self.gas_training_mean   = self.file['gas'].attrs['training_mean']
-        self.gas_training_stddev = self.file['gas'].attrs['training_stddev']
+        self.DM_training_mean    = self.files[0]['DM'].attrs['training_mean']
+        self.DM_training_stddev  = self.files[0]['DM'].attrs['training_stddev']
+        self.gas_training_mean   = self.files[0]['gas'].attrs['training_mean']
+        self.gas_training_stddev = self.files[0]['gas'].attrs['training_stddev']
         
         self.xx_indices_rnd = None
         self.yy_indices_rnd = None
@@ -280,14 +291,15 @@ class InputData(Dataset) :#{{{
         self.yy_indices_rnd = np.random.randint(0, high=self.ylength, size=self.globdat.Nsamples[self.mode])
         self.zz_indices_rnd = np.random.randint(0, high=self.zlength, size=self.globdat.Nsamples[self.mode])
     #}}}
-    def __generate_rnd_index(self,  __this_ID) :
+    def __generate_rnd_index(self,  __this_ID) :#{{{
         xx_rnd = self.rnd_generators[__this_ID].randint(0, high=self.xlength)
         yy_rnd = self.rnd_generators[__this_ID].randint(0, high=self.ylength)
         zz_rnd = self.rnd_generators[__this_ID].randint(0, high=self.zlength)
         return xx_rnd, yy_rnd, zz_rnd
+    #}}}
     def __randomly_transform(self, arr1, arr2, __this_ID) :#{{{
         # reflections
-        if self.rnd_generators[__this_ID].random.rand() < 0.5 :
+        if self.rnd_generators[__this_ID].rand() < 0.5 :
             arr1 = arr1[::-1,:,:]
             arr1 = arr1[::-1,:,:]
         if self.rnd_generators[__this_ID].rand() < 0.5 :
@@ -339,10 +351,11 @@ class InputData(Dataset) :#{{{
         return DM, gas
     #}}}
     def __getitem__(self, index) :#{{{
-        __this_ID = torch.utils.data.get_worker_info().id
+        __this_ID = get_worker_info().id
         if self.xx_indices_rnd is None or self.yy_indices_rnd is None or self.zz_indices_rnd is None :
+            __rnd_index = self.__generate_rnd_index(__this_ID)
             DM, gas = self.getitem_deterministic(
-                *self.__generate_rnd_index(__this_ID), __this_ID = __this_ID
+                __rnd_index[0], __rnd_index[1], __rnd_index[2], __this_ID
                 )
         else : # useful to keep validation set manageable (reduce noise in validation loss)
             DM, gas = self.getitem_deterministic(
@@ -351,7 +364,7 @@ class InputData(Dataset) :#{{{
                 self.zz_indices_rnd[index],
                 __this_ID
                 )
-        DM, gas = InputData.__randomly_transform(DM, gas, __this_ID)
+        DM, gas = self.__randomly_transform(DM, gas, __this_ID)
         assert DM.shape[0]==DM.shape[1]==DM.shape[2]==self.globdat.DM_sidelength, DM.shape
         assert gas.shape[0]==gas.shape[1]==gas.shape[2]==self.globdat.gas_sidelength, gas.shape
         return torch.from_numpy(DM.copy()).unsqueeze(0), torch.from_numpy(gas.copy()).unsqueeze(0)
@@ -502,7 +515,8 @@ class Mesh(object) :#{{{
         self.globdat = globdat
         self.arr = arr
         self.mesh = None
-    def read_mesh(self) :
+    #}}}
+    def read_mesh(self) :#{{{
         if self.mesh is not None :
             print 'Already read mesh, No action taken.'
         if self.arr is None :
@@ -510,7 +524,7 @@ class Mesh(object) :#{{{
         else :
             self.mesh = ArrayMesh(
                 self.arr,
-                BoxSize=(self.globdat.box_size/float(self.globdat.box_sidelength))*float(self.arr.shape)
+                BoxSize=(self.globdat.box_size/float(self.globdat.box_sidelength))*np.array(self.arr.shape)
                 )
     #}}}
     def compute_powerspectrum(self) :#{{{
@@ -521,48 +535,61 @@ class Mesh(object) :#{{{
 #}}}
 
 class Analysis(object) :#{{{
-    def __init__(self, globdat, data) :#{{{
+    def __init__(self, globdat, data, **kwargs) :#{{{
         # data is instance of InputData
         self.globdat = globdat
         self.data = data
+        self.fraction = kwargs['fraction'] if 'fraction' in kwargs else 1.0
 
+        self.xlength = int(self.fraction*self.data.xlength)
+        self.ylength = int(self.fraction*self.data.ylength)
+        self.zlength = int(self.fraction*self.data.zlength)
+
+        self.__rescalings = {
+            'log'    : lambda x : np.exp(x*self.data.gas_training_stddev+self.data.gas_training_mean),
+            'linear' : lambda x : x**1.0,
+            'sqrt'   : lambda x : x**2.0,
+            'cbrt'   : lambda x : x**3.0,
+            }
+
+        self.original_field  = None
         self.predicted_field = None
-
-        # TODO rescale to original units
-        #self.original_field_mesh = Mesh(
-        #    self.globdat,
-        #    self.data.gas_dataset[
-        #        (self.globdat.DM_sidelength-self.globdat.gas_sidelength)/2 : self.globdat.xlength+(self.globdat.DM_sidelength-self.globdat.gas_sidelength)/2,
-        #        (self.globdat.DM_sidelength-self.globdat.gas_sidelength)/2 : self.globdat.ylength+(self.globdat.DM_sidelength-self.globdat.gas_sidelength)/2,
-        #        (self.globdat.DM_sidelength-self.globdat.gas_sidelength)/2 : self.globdat.zlength+(self.globdat.DM_sidelength-self.globdat.gas_sidelength)/2,
-        #        ]
-        #    )
-        #self.predicted_field_mesh = Mesh(self.globdat, self.predicted_field)
 
         self.original_power_spectrum = None
         self.predicted_power_spectrum = None
     #}}}
+    def read_original(self) :#{{{
+        self.original_field = self.__rescalings[ARGS.scaling](
+            self.data.gas_datasets[0][
+                (self.globdat.DM_sidelength-self.globdat.gas_sidelength)/2 : self.xlength+(self.globdat.DM_sidelength-self.globdat.gas_sidelength)/2,
+                (self.globdat.DM_sidelength-self.globdat.gas_sidelength)/2 : self.ylength+(self.globdat.DM_sidelength-self.globdat.gas_sidelength)/2,
+                (self.globdat.DM_sidelength-self.globdat.gas_sidelength)/2 : self.zlength+(self.globdat.DM_sidelength-self.globdat.gas_sidelength)/2,
+                ]
+            )
+        self.original_field_mesh  = Mesh(self.globdat, self.original_field)
+        self.original_field_mesh.read_mesh()
+    #}}}
     def predict_single_cube(self, xx, yy, zz) :#{{{
-        DM, gas_original = self.data.getitem_deterministic(xx, yy, zz)
-        if GPU_AVAIL :
-            gas_pred = self.globdat.net(
-                torch.autograd.Variable(torch.from_numpy(DM.copy()).unsqueeze(0), requires_grad=False).cuda()
-                )
-        else :
-            gas_pred = self.globdat.net(
-                torch.autograd.Variable(torch.from_numpy(DM.copy()).unsqueeze(0), requires_grad=False)
-                )
-        return gas_original, gas_pred.data.cpu().numpy()
+        DM, gas_original = self.data.getitem_deterministic(xx, yy, zz, 0)
+        gas_pred = self.globdat.net(
+            torch.autograd.Variable(torch.from_numpy(DM.copy()).unsqueeze(0).unsqueeze(0).to(DEVICE), requires_grad=False)
+            )[0,0,...]
+        return self.__rescalings[ARGS.scaling](gas_original), self.__rescalings[ARGS.scaling](gas_pred.data.cpu().numpy())
     #}}}
     def predict_whole_volume(self) :#{{{
-        self.predicted_field = np.empty(
-            (self.globdat.xlength, self.globdat.ylength, self.globdat.zlength),
+        self.predicted_field = np.zeros(
+            (self.xlength, self.ylength, self.zlength),
             dtype = np.float32
             )
-        xx, yy, zz = 0, 0, 0
-        break_xx, break_yy, break_zz = False, False, False
+        xx = 0
+        break_xx = False
         while True :
+            print '%.1f percent done in predict_whole_volume.'%(float(xx)/float(self.xlength)*100.0)
+            yy = 0
+            break_yy = False
             while True :
+                zz = 0
+                break_zz = False
                 while True :
                     _, gas_pred = self.predict_single_cube(xx, yy, zz)
                     self.predicted_field[
@@ -570,37 +597,85 @@ class Analysis(object) :#{{{
                         yy : yy + self.globdat.gas_sidelength,
                         zz : zz + self.globdat.gas_sidelength
                         ] = gas_pred
-                    if zz < self.data.zlength - self.globdat.gas_sidelength :
+                    if zz < self.zlength - 2*self.globdat.gas_sidelength :
                         zz += self.globdat.gas_sidelength
                     elif break_zz :
                         break
                     else :
-                        zz = self.data.zlength - self.globdat.gas_sidelength
+                        zz = self.zlength - self.globdat.gas_sidelength
                         break_zz = True
-                if yy < self.data.ylength - self.globdat.gas_sidelength :
+                if yy < self.ylength - 2*self.globdat.gas_sidelength :
                     yy += self.globdat.gas_sidelength
                 elif break_yy :
-                    break;
+                    break
                 else :
-                    yy = self.data.ylength - self.globdat.gas_sidelength
+                    yy = self.ylength - self.globdat.gas_sidelength
                     break_yy = True
-            if xx < self.data.xlength - self.globdat.gas_sidelength :
+            if xx < self.xlength - 2*self.globdat.gas_sidelength :
                 xx += self.globdat.gas_sidelength
             elif break_xx : 
                 break
             else :
-                xx = self.data.xlength - self.globdat.gas_sidelength
+                xx = self.xlength - self.globdat.gas_sidelength
                 break_xx = True
+        self.predicted_field_mesh = Mesh(self.globdat, self.predicted_field)
+        self.predicted_field_mesh.read_mesh()
     #}}}
     def compute_powerspectrum(self, mode) :#{{{
         if mode is 'original' :
             if self.original_power_spectrum is not None :
-                print 'Already computed this original power spectrum. No action taken.'
+                if ARGS.verbose :
+                    print 'Already computed this original power spectrum. No action taken.'
+            elif ARGS.powerspectrumfid is not None :
+                try :
+                    f = np.load('%s.npz'%ARGS.powerspectrumfid)
+                    self.original_power_spectrum = {
+                        'k': f['k'],
+                        'P': f['P'],
+                        }
+                    if ARGS.verbose :
+                        print 'Read original power spectrum from %s.npz'%ARGS.powerspectrumfid
+                except IOError :
+                    r = self.original_field_mesh.compute_powerspectrum()
+                    self.original_power_spectrum = {
+                        'k': r.power['k'],
+                        'P': r.power['power'].real,
+                        }
+                    np.savez(
+                        '%s.npz'%ARGS.powerspectrumfid,
+                        k = self.original_power_spectrum['k'],
+                        P = self.original_power_spectrum['P'],
+                        )
+                    if ARGS.verbose :
+                        print 'Computed original power spectrum and saved to %s.npz'%ARGS.powerspectrumfid
             else :
                 self.original_power_spectrum = self.original_field_mesh.compute_powerspectrum()
         elif mode is 'predicted' :
             if self.predicted_power_spectrum is not None :
-                print 'Already computed this predicted power spectrum. No action taken.'
+                if ARGS.verbose :
+                    print 'Already computed this predicted power spectrum. No action taken.'
+            elif ARGS.powerspectrumpred is not None :
+                try :
+                    f = np.load('%s_%s.npz'%(ARGS.powerspectrumpred, ARGS.output))
+                    self.predicted_power_spectrum = {
+                        'k': f['k'],
+                        'P': f['P'],
+                        }
+                    if ARGS.verbose :
+                        print 'Read predicted power spectrum from %s_%s.npz'%(ARGS.powerspectrumpred, ARGS.output)
+                except IOError :
+                    r = self.predicted_field_mesh.compute_powerspectrum()
+                    self.predicted_power_spectrum = {
+                        'k': r.power['k'],
+                        'P': r.power['power'].real,
+                        }
+                    np.savez(
+                        '%s_%s.npz'%(ARGS.powerspectrumpred, ARGS.output),
+                        k = self.predicted_power_spectrum['k'],
+                        P = self.predicted_power_spectrum['P'],
+                        )
+                    if ARGS.verbose :
+                        print 'Computed predicted power spectrum and saved to %s_%s.npz'%(ARGS.powerspectrumpred, ARGS.output)
             else :
                 self.predicted_power_spectrum = self.predicted_field_mesh.compute_powerspectrum()
         else :
@@ -643,97 +718,132 @@ if __name__ == '__main__' :
 
         globdat = GlobalData(*CONFIGS)
 
-        globdat.net = nn.DataParallel(Network(import_module(ARGS.network).this_network))
-        globdat.load_network('trained_network_%s.pt'%ARGS.output)
+        try :
+            globdat.net = nn.DataParallel(Network(import_module(ARGS.network).this_network))
+            globdat.load_network('trained_network_%s.pt'%ARGS.output)
+        except RuntimeError :
+            globdat.net = Network(import_module(ARGS.network).this_network)
+            globdat.load_network('trained_network_%s.pt'%ARGS.output)
             
         validation_set = InputData(globdat, 'validation')
-        validation_set.generate_rnd_indices()
-        validation_loader = globdat.data_loader(validation_set)
 
-        NPAGES = 4
-        for t, data in enumerate(validation_loader) :
-            if t == NPAGES : break
+        # VISUAL OUTPUT INSPECTION
+        if False :#{{{
+            validation_loader = globdat.data_loader(validation_set)
 
-            with torch.no_grad() :
-                targ = copy.deepcopy(data[1])
-                orig = copy.deepcopy(data[0])
-                pred = globdat.net(
-                    torch.autograd.Variable(data[0], requires_grad=False)
-                    )
-            
-            NPlots = 8
-            fig = plt.figure(figsize=(8.5, 11.0))
-            gs0 = gs.GridSpec(NPlots/2, 2, figure=fig, wspace = 0.2)
-            for ii in xrange(NPlots) :
-                plane_gas = np.random.randint(0, high=globdat.gas_sidelength)
-                plane_DM  = plane_gas + (globdat.DM_sidelength-globdat.gas_sidelength)/2
+            NPAGES = 4
+            for t, data in enumerate(validation_loader) :
+                if t == NPAGES : break
 
-                gs00 = gs.GridSpecFromSubplotSpec(
-                    2, 3, subplot_spec=gs0[ii%(NPlots/2), ii/(NPlots/2)],
-                    wspace = 0.1
-                    )
-                ax_orig = plt.subplot(gs00[:,:2])
-                ax_targ = plt.subplot(gs00[:1,-1])
-                ax_pred = plt.subplot(gs00[1:,-1])
-                fig.add_subplot(ax_orig)
-                fig.add_subplot(ax_targ)
-                fig.add_subplot(ax_pred)
-
-#                if ARGS.scaling=='log' :
-                if True :
-                    vminmax = 3 # standard deviations
-                    ax_orig.matshow(
-                        orig[ii,0,plane_DM,:,:].numpy(),
-                        extent=(0, globdat.DM_sidelength, 0, globdat.DM_sidelength),
-#                        vmin = -vminmax, vmax = vminmax,
+                with torch.no_grad() :
+                    targ = copy.deepcopy(data[1])
+                    orig = copy.deepcopy(data[0])
+                    pred = globdat.net(
+                        torch.autograd.Variable(data[0], requires_grad=False)
                         )
-                    ax_targ.matshow(
-                        targ[ii,0,plane_gas,:,:].numpy(),
-#                        vmin = -vminmax, vmax = vminmax,
-                        )
-                    ax_pred.matshow(
-                        pred[ii,0,plane_gas,:,:].numpy(),
-#                        vmin = -vminmax, vmax = vminmax,
-                        )
-#                elif ARGS.scaling=='linear' :
-#                    ax_orig.matshow(
-#                        np.log(np.sum(np.exp(orig[ii,0,:,:,:].numpy()), axis=0)),
-#                        extent=(0, globdat.DM_sidelength, 0, globdat.DM_sidelength),
-#                        )
-#                    ax_targ.matshow(
-#                        np.log(np.sum(targ[ii,0,:,:,:].numpy(), axis=0)),
-#                        )
-#                    ax_pred.matshow(
-#                        np.log(np.sum(pred[ii,0,:,:,:].numpy(), axis=0)),
-#                        )
+                
+                NPlots = 8
+                fig = plt.figure(figsize=(8.5, 11.0))
+                gs0 = gs.GridSpec(NPlots/2, 2, figure=fig, wspace = 0.2)
+                for ii in xrange(NPlots) :
+                    plane_gas = np.random.randint(0, high=globdat.gas_sidelength)
+                    plane_DM  = plane_gas + (globdat.DM_sidelength-globdat.gas_sidelength)/2
 
-                rect = Rectangle(
-                    (
-                        (globdat.DM_sidelength-globdat.gas_sidelength)/2,
-                        (globdat.DM_sidelength-globdat.gas_sidelength)/2,
-                    ),
-                    width=globdat.gas_sidelength, height=globdat.gas_sidelength,
-                    axes = ax_orig,
-                    edgecolor = 'red',
-                    fill = False,
+                    gs00 = gs.GridSpecFromSubplotSpec(
+                        2, 3, subplot_spec=gs0[ii%(NPlots/2), ii/(NPlots/2)],
+                        wspace = 0.1
+                        )
+                    ax_orig = plt.subplot(gs00[:,:2])
+                    ax_targ = plt.subplot(gs00[:1,-1])
+                    ax_pred = plt.subplot(gs00[1:,-1])
+                    fig.add_subplot(ax_orig)
+                    fig.add_subplot(ax_targ)
+                    fig.add_subplot(ax_pred)
+
+    #                if ARGS.scaling=='log' :
+                    if True :
+                        vminmax = 3 # standard deviations
+                        ax_orig.matshow(
+                            orig[ii,0,plane_DM,:,:].numpy(),
+                            extent=(0, globdat.DM_sidelength, 0, globdat.DM_sidelength),
+    #                        vmin = -vminmax, vmax = vminmax,
+                            )
+                        ax_targ.matshow(
+                            targ[ii,0,plane_gas,:,:].numpy(),
+    #                        vmin = -vminmax, vmax = vminmax,
+                            )
+                        ax_pred.matshow(
+                            pred[ii,0,plane_gas,:,:].numpy(),
+    #                        vmin = -vminmax, vmax = vminmax,
+                            )
+    #                elif ARGS.scaling=='linear' :
+    #                    ax_orig.matshow(
+    #                        np.log(np.sum(np.exp(orig[ii,0,:,:,:].numpy()), axis=0)),
+    #                        extent=(0, globdat.DM_sidelength, 0, globdat.DM_sidelength),
+    #                        )
+    #                    ax_targ.matshow(
+    #                        np.log(np.sum(targ[ii,0,:,:,:].numpy(), axis=0)),
+    #                        )
+    #                    ax_pred.matshow(
+    #                        np.log(np.sum(pred[ii,0,:,:,:].numpy(), axis=0)),
+    #                        )
+
+                    rect = Rectangle(
+                        (
+                            (globdat.DM_sidelength-globdat.gas_sidelength)/2,
+                            (globdat.DM_sidelength-globdat.gas_sidelength)/2,
+                        ),
+                        width=globdat.gas_sidelength, height=globdat.gas_sidelength,
+                        axes = ax_orig,
+                        edgecolor = 'red',
+                        fill = False,
+                        )
+                    ax_orig.add_patch(rect)
+
+                    ax_orig.set_xticks([])
+                    ax_targ.set_xticks([])
+                    ax_pred.set_xticks([])
+                    ax_orig.set_yticks([])
+                    ax_targ.set_yticks([])
+                    ax_pred.set_yticks([])
+
+                    ax_orig.set_ylabel('Input DM field')
+                    ax_targ.set_ylabel('Target')
+                    ax_pred.set_ylabel('Prediction')
+
+                plt.suptitle('Output: %s, Scaling: %s'%(ARGS.output, ARGS.scaling), family='monospace')
+                plt.show()
+                #plt.savefig('./Outputs/comparison_target_predicted_%s_pg%d.pdf'%(ARGS.output,t))
+                #plt.cla()
+        #}}}
+
+        # SUMMARY STATISTICS
+        if True :#{{{
+
+            a = Analysis(globdat, validation_set, fraction=1.0)
+
+#            a.read_original()
+#            a.compute_powerspectrum('original')
+            a.predict_whole_volume()
+            a.compute_powerspectrum('predicted')
+
+            if False :
+                plt.loglog(
+                    a.original_power_spectrum['k'],
+                    a.original_power_spectrum['P'],
+                    label = 'original',
                     )
-                ax_orig.add_patch(rect)
+                plt.loglog(
+                    a.predicted_power_spectrum['k'],
+                    a.predicted_power_spectrum['P'],
+                    label = 'predicted',
+                    )
+                plt.xlabel('k')
+                plt.ylabel('P(k)')
+                plt.legend()
+                plt.show()
 
-                ax_orig.set_xticks([])
-                ax_targ.set_xticks([])
-                ax_pred.set_xticks([])
-                ax_orig.set_yticks([])
-                ax_targ.set_yticks([])
-                ax_pred.set_yticks([])
-
-                ax_orig.set_ylabel('Input DM field')
-                ax_targ.set_ylabel('Target')
-                ax_pred.set_ylabel('Prediction')
-
-            plt.suptitle('Output: %s, Scaling: %s'%(ARGS.output, ARGS.scaling), family='monospace')
-            plt.show()
-            #plt.savefig('./Outputs/comparison_target_predicted_%s_pg%d.pdf'%(ARGS.output,t))
-            #plt.cla()
+        #}}}
     #}}}
 
     # TRAINING

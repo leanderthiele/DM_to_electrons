@@ -6,6 +6,7 @@ from importlib import import_module
 import numpy as np
 from nbodykit.lab import ArrayMesh, FFTPower
 import h5py
+from mpi4py import MPI
 import torch
 from torch import nn
 from torch.utils.data.dataset import Dataset
@@ -271,7 +272,7 @@ class InputData(Dataset) :#{{{
         self.gas_datasets = []
         self.rnd_generators = []
         for ii in xrange(self.globdat.num_workers) :
-            self.files.append(h5py.File(self.globdat.data_path, 'r'))
+            self.files.append(h5py.File(self.globdat.data_path, 'r', driver='mpio', comm=MPI.COMM_WORLD))
             self.DM_datasets.append(self.files[-1]['DM/'+self.mode])
             self.gas_datasets.append(self.files[-1]['gas/'+self.mode])
             self.rnd_generators.append(np.random.RandomState(int(1e6*clock())+ii))
@@ -295,7 +296,7 @@ class InputData(Dataset) :#{{{
         xx_rnd = self.rnd_generators[__this_ID].randint(0, high=self.xlength)
         yy_rnd = self.rnd_generators[__this_ID].randint(0, high=self.ylength)
         zz_rnd = self.rnd_generators[__this_ID].randint(0, high=self.zlength)
-        return xx_rnd, yy_rnd, zz_rnd
+        return xx_rnd, yy_rnd, zz_rnd, __this_ID
     #}}}
     def __randomly_transform(self, arr1, arr2, __this_ID) :#{{{
         # reflections
@@ -353,9 +354,8 @@ class InputData(Dataset) :#{{{
     def __getitem__(self, index) :#{{{
         __this_ID = get_worker_info().id
         if self.xx_indices_rnd is None or self.yy_indices_rnd is None or self.zz_indices_rnd is None :
-            __rnd_index = self.__generate_rnd_index(__this_ID)
             DM, gas = self.getitem_deterministic(
-                __rnd_index[0], __rnd_index[1], __rnd_index[2], __this_ID
+                *self.__generate_rnd_index(__this_ID)
                 )
         else : # useful to keep validation set manageable (reduce noise in validation loss)
             DM, gas = self.getitem_deterministic(
@@ -822,9 +822,12 @@ if __name__ == '__main__' :
 
             a = Analysis(globdat, validation_set, fraction=1.0)
 
-#            a.read_original()
-#            a.compute_powerspectrum('original')
+            a.read_original()
+            a.compute_powerspectrum('original')
             a.predict_whole_volume()
+            # TODO
+            np.savez('/scratch/gpfs/lthiele/whole_volume.npz', pred=a.predicted_field, orig=a.original_field)
+            # END TODO
             a.compute_powerspectrum('predicted')
 
             if False :

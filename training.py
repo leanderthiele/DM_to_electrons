@@ -21,7 +21,7 @@ import argparse
 
 """
 TODO
-write code for testing
+write code for testing --> use dataloader for prediction!
 add support to load pre-trained model in train mode
 """
 
@@ -256,13 +256,66 @@ class GlobalData(object) :#{{{
     #}}}
 #}}}
 
-class InputData(Dataset) :#{{{
+class Stepper(object) :#{{{
     def __init__(self, globdat, mode) :#{{{
+        self.globdat = globdat
+        self.mode = mode
+        self.xlength = self.globdat.block_shapes[mode][0] - self.globdat.DM_sidelength
+        self.ylength = self.globdat.block_shapes[mode][1] - self.globdat.DM_sidelength
+        self.zlength = self.globdat.block_shapes[mode][2] - self.globdat.DM_sidelength
+
+        self.max_x_index = self.__max_index(self.xlength)
+        self.max_y_index = self.__max_index(self.ylength)
+        self.max_z_index = self.__max_index(self.zlength)
+    #}}}
+    def __max_index(self, total_length) :#{{{
+        if total_length%self.globdat.gas_sidelength == 0 : # gas sidelength fits perfectly
+            return total_length/self.globdat.gas_sidelength - 1
+        else : # need some patching at the end
+            return total_length/self.globdat.gas_sidelength
+    #}}}
+    def __index_3D(self, index) :#{{{
+        return (
+            index/((self.max_y_index+1)*(self.max_z_index+1)),
+            (index/(self.max_z_index+1))%(self.max_y_index+1),
+            index%(self.max_z_index+1),
+            )
+    #}}}
+    def __real_index(self, index, total_length) :#{{{
+        if index < total_length/self.globdat.gas_sidelength :
+            return index * self.globdat.gas_sidelength
+        elif index == total_length/self.globdat.gas_sidelength :
+            return total_length - self.globdat.gas_sidelength
+    #}}}
+    def __getitem__(self, index) :#{{{
+        x_index, y_index, z_index = self.__index_3D(index)
+        assert x_index <= self.max_x_index
+        assert y_index <= self.max_y_index
+        assert z_index <= self.max_z_index
+        x_index = self.__real_index(x_index, self.xlength)
+        y_index = self.__real_index(y_index, self.ylength)
+        z_index = self.__real_index(z_index, self.zlength)
+        assert x_index <= self.xlength - self.globdat.gas_sidelength
+        assert y_index <= self.ylength - self.globdat.gas_sidelength
+        assert z_index <= self.zlength - self.globdat.gas_sidelength
+        return x_index, y_index, z_index
+    #}}}
+    def __len__(self) :#{{{
+        return (self.max_x_index+1)*(self.max_y_index+1)*(self.max_z_index+1)
+    #}}}
+#}}}
+
+class InputData(Dataset) :#{{{
+    def __init__(self, globdat, mode, stepper = None) :#{{{
         """
         mode = 'training' , 'validation' , 'testing'
         """
         self.globdat = globdat
         self.mode = mode
+        self.stepper = stepper
+
+        self.do_random_transformations = True if self.stepper is None else False
+
         self.xlength = self.globdat.block_shapes[mode][0] - self.globdat.DM_sidelength
         self.ylength = self.globdat.block_shapes[mode][1] - self.globdat.DM_sidelength
         self.zlength = self.globdat.block_shapes[mode][2] - self.globdat.DM_sidelength
@@ -296,7 +349,7 @@ class InputData(Dataset) :#{{{
         xx_rnd = self.rnd_generators[__this_ID].randint(0, high=self.xlength)
         yy_rnd = self.rnd_generators[__this_ID].randint(0, high=self.ylength)
         zz_rnd = self.rnd_generators[__this_ID].randint(0, high=self.zlength)
-        return xx_rnd, yy_rnd, zz_rnd, __this_ID
+        return xx_rnd, yy_rnd, zz_rnd
     #}}}
     def __randomly_transform(self, arr1, arr2, __this_ID) :#{{{
         # reflections
@@ -353,25 +406,33 @@ class InputData(Dataset) :#{{{
     #}}}
     def __getitem__(self, index) :#{{{
         __this_ID = get_worker_info().id
-        if self.xx_indices_rnd is None or self.yy_indices_rnd is None or self.zz_indices_rnd is None :
-            DM, gas = self.getitem_deterministic(
-                *self.__generate_rnd_index(__this_ID)
-                )
-        else : # useful to keep validation set manageable (reduce noise in validation loss)
-            DM, gas = self.getitem_deterministic(
-                self.xx_indices_rnd[index],
-                self.yy_indices_rnd[index],
-                self.zz_indices_rnd[index],
-                __this_ID
-                )
-        DM, gas = self.__randomly_transform(DM, gas, __this_ID)
-        assert DM.shape[0]==DM.shape[1]==DM.shape[2]==self.globdat.DM_sidelength, DM.shape
-        assert gas.shape[0]==gas.shape[1]==gas.shape[2]==self.globdat.gas_sidelength, gas.shape
-        return torch.from_numpy(DM.copy()).unsqueeze(0), torch.from_numpy(gas.copy()).unsqueeze(0)
-        # add fake dimension
+        if self.stepper is not None :
+            __this_xx, __this_yy, __this_zz = self.stepper[index]
+        elif self.xx_indices_rnd is None or self.yy_indices_rnd is None or self.zz_indices_rnd is None :
+            __this_xx, __this_yy, __this_zz = self.__generate_rnd_index(__this_ID)
+        else :
+            __this_xx, __this_yy, __this_zz = self.xx_indices_rnd[index], self.yy_indices_rnd[index], self.zz_indices_rnd[index]
+
+        DM, gas = self.getitem_deterministic(
+            __this_xx, __this_yy, __this_zz,
+            __this_ID
+            )
+        if self.do_random_transformations :
+            DM, gas = self.__randomly_transform(DM, gas, __this_ID)
+        assert DM.shape[0]  == DM.shape[1]  == DM.shape[2]  == self.globdat.DM_sidelength,  DM.shape
+        assert gas.shape[0] == gas.shape[1] == gas.shape[2] == self.globdat.gas_sidelength, gas.shape
+
+        return (
+            torch.from_numpy(DM.copy()).unsqueeze(0), torch.from_numpy(gas.copy()).unsqueeze(0),
+            torch.from_numpy(np.array([__this_xx, __this_yy, __this_zz]))
+            )
+        # add fake dimension (channel dimension is 0 here)
     #}}}
     def __len__(self) :#{{{
-        return self.globdat.Nsamples[self.mode]
+        if self.stepper is None :
+            return self.globdat.Nsamples[self.mode]
+        else :
+            return len(self.stepper)
     #}}}
 #}}}
 
@@ -569,55 +630,24 @@ class Analysis(object) :#{{{
         self.original_field_mesh  = Mesh(self.globdat, self.original_field)
         self.original_field_mesh.read_mesh()
     #}}}
-    def predict_single_cube(self, xx, yy, zz) :#{{{
-        DM, gas_original = self.data.getitem_deterministic(xx, yy, zz, 0)
-        gas_pred = self.globdat.net(
-            torch.autograd.Variable(torch.from_numpy(DM.copy()).unsqueeze(0).unsqueeze(0).to(DEVICE), requires_grad=False)
-            )[0,0,...]
-        return self.__rescalings[ARGS.scaling](gas_original), self.__rescalings[ARGS.scaling](gas_pred.data.cpu().numpy())
-    #}}}
     def predict_whole_volume(self) :#{{{
         self.predicted_field = np.zeros(
             (self.xlength, self.ylength, self.zlength),
             dtype = np.float32
             )
-        xx = 0
-        break_xx = False
-        while True :
-            print '%.1f percent done in predict_whole_volume.'%(float(xx)/float(self.xlength)*100.0)
-            yy = 0
-            break_yy = False
-            while True :
-                zz = 0
-                break_zz = False
-                while True :
-                    _, gas_pred = self.predict_single_cube(xx, yy, zz)
-                    self.predicted_field[
-                        xx : xx + self.globdat.gas_sidelength,
-                        yy : yy + self.globdat.gas_sidelength,
-                        zz : zz + self.globdat.gas_sidelength
-                        ] = gas_pred
-                    if zz < self.zlength - 2*self.globdat.gas_sidelength :
-                        zz += self.globdat.gas_sidelength
-                    elif break_zz :
-                        break
-                    else :
-                        zz = self.zlength - self.globdat.gas_sidelength
-                        break_zz = True
-                if yy < self.ylength - 2*self.globdat.gas_sidelength :
-                    yy += self.globdat.gas_sidelength
-                elif break_yy :
-                    break
-                else :
-                    yy = self.ylength - self.globdat.gas_sidelength
-                    break_yy = True
-            if xx < self.xlength - 2*self.globdat.gas_sidelength :
-                xx += self.globdat.gas_sidelength
-            elif break_xx : 
-                break
-            else :
-                xx = self.xlength - self.globdat.gas_sidelength
-                break_xx = True
+        loader = globdat.data_loader(self.data)
+        for t, data in enumerate(loader) :
+            with torch.no_grad() :
+                pred = globdat.net(
+                    torch.autograd.Variable(data[0].to(DEVICE), requires_grad = False)
+                    )[:,0,...].cpu().numpy() #
+            __coords = data[-1].numpy()
+            for ii in xrange(pred.shape[0]) : # loop over batch dimension
+                self.predicted_field[
+                    __coords[ii,0] : __coords[ii,0] + self.globdat.gas_sidelength,
+                    __coords[ii,1] : __coords[ii,1] + self.globdat.gas_sidelength,
+                    __coords[ii,2] : __coords[ii,2] + self.globdat.gas_sidelength
+                    ] = self.__rescalings[ARGS.scaling](pred[ii,...])
         self.predicted_field_mesh = Mesh(self.globdat, self.predicted_field)
         self.predicted_field_mesh.read_mesh()
     #}}}
@@ -725,7 +755,8 @@ if __name__ == '__main__' :
             globdat.net = Network(import_module(ARGS.network).this_network)
             globdat.load_network('trained_network_%s.pt'%ARGS.output)
             
-        validation_set = InputData(globdat, 'validation')
+        stepper = Stepper(globdat, 'validation')
+        validation_set = InputData(globdat, 'validation', stepper)
 
         # VISUAL OUTPUT INSPECTION
         if False :#{{{

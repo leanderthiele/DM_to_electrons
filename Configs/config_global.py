@@ -32,6 +32,12 @@ this_config = {
                         'shuffle': False,
                       },
 
+    # sample selector
+    'sample_selector_kw': {
+                            'empty_fraction': 0.3,
+                            'pos_mass_file': '/scratch/gpfs/lthiele/important_halos.hdf5',
+                          },
+
     # describes individual epochs
     'Nsamples': {
                     'training': 8192,

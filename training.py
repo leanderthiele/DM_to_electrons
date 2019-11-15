@@ -21,8 +21,9 @@ import argparse
 
 """
 TODO
-write code for testing --> use dataloader for prediction!
 add support to load pre-trained model in train mode
+factor stepper
+!!!clean the xlength issue in stepper and analysis
 """
 
 class _ArgParser(object) :#{{{
@@ -173,6 +174,9 @@ class GlobalData(object) :#{{{
         if self.__lr_scheduler is not None :
             self.__lr_scheduler_kw = configs[0]['lr_scheduler_%s_kw'%configs[0]['lr_scheduler']]
 
+        # sample selector
+        self.sample_selector_kw = configs[0]['sample_selector_kw']
+
         # where to find and put data files
         self.__input_path  = configs[0]['input_path']
         self.__output_path = configs[0]['output_path']
@@ -190,7 +194,7 @@ class GlobalData(object) :#{{{
                              'validation': (self.box_sidelength,(1368*self.box_sidelength)/2048, ( 620*self.box_sidelength)/2048),
                              'testing':    (self.box_sidelength,( 680*self.box_sidelength)/2048, ( 620*self.box_sidelength)/2048),
                             }
-        self.box_size = 205.0 # Mpc
+        self.box_size = 205.0 # Mpc/h
 
         # keep track of training
         self.training_steps = []
@@ -270,9 +274,9 @@ class Stepper(object) :#{{{
     #}}}
     def __max_index(self, total_length) :#{{{
         if total_length%self.globdat.gas_sidelength == 0 : # gas sidelength fits perfectly
-            return total_length/self.globdat.gas_sidelength - 1
-        else : # need some patching at the end
             return total_length/self.globdat.gas_sidelength
+        else : # need some patching at the end
+            return total_length/self.globdat.gas_sidelength + 1
     #}}}
     def __index_3D(self, index) :#{{{
         return (
@@ -282,9 +286,9 @@ class Stepper(object) :#{{{
             )
     #}}}
     def __real_index(self, index, total_length) :#{{{
-        if index < total_length/self.globdat.gas_sidelength :
+        if index < total_length/self.globdat.gas_sidelength + 1 :
             return index * self.globdat.gas_sidelength
-        elif index == total_length/self.globdat.gas_sidelength :
+        elif index == total_length/self.globdat.gas_sidelength + 1 :
             return total_length - self.globdat.gas_sidelength
     #}}}
     def __getitem__(self, index) :#{{{
@@ -295,13 +299,68 @@ class Stepper(object) :#{{{
         x_index = self.__real_index(x_index, self.xlength)
         y_index = self.__real_index(y_index, self.ylength)
         z_index = self.__real_index(z_index, self.zlength)
-        assert x_index <= self.xlength - self.globdat.gas_sidelength
-        assert y_index <= self.ylength - self.globdat.gas_sidelength
-        assert z_index <= self.zlength - self.globdat.gas_sidelength
         return x_index, y_index, z_index
     #}}}
     def __len__(self) :#{{{
         return (self.max_x_index+1)*(self.max_y_index+1)*(self.max_z_index+1)
+    #}}}
+#}}}
+
+class PositionSelector(object) :#{{{
+    def __init__(self, globdat, mode, seed = 0, **kwargs) :#{{{
+        self.globdat = globdat
+        self.mode = mode
+
+        self.xlength = self.globdat.block_shapes[self.mode][0] - self.globdat.DM_sidelength
+        self.ylength = self.globdat.block_shapes[self.mode][1] - self.globdat.DM_sidelength
+        self.zlength = self.globdat.block_shapes[self.mode][2] - self.globdat.DM_sidelength
+
+        self.empty_fraction = kwargs['empty_fraction'] if 'empty_fraction' in kwargs else 1.0
+        self.rnd_generator = np.random.RandomState(int(1e6*clock()) + seed)
+        assert self.empty_fraction >= 0.0
+        if self.empty_fraction < 1.0 :
+#            with h5py.File(kwargs['pos_mass_file'], 'r') as f :
+            with h5py.File(kwargs['pos_mass_file'], 'r') as f :
+                self.pos  = f['/%s/coords'%self.mode][:] # kpc/h
+                self.log_mass = np.log10(1e10*f['/%s/M500c'%self.mode][:]) # log Msun/h
+            assert self.pos.shape[0] == self.log_mass.shape[0]
+            # cnvert to pixel coordinates
+            self.pos = (self.pos*float(self.globdat.box_sidelength)/(1e3*self.globdat.box_size)).astype(int)
+            assert np.max(self.pos[:,0]) < self.globdat.block_shapes[self.mode][0], '%d > %d'%(np.max(self.pos[:,0]),self.globdat.block_shapes[self.mode][0])
+            assert np.max(self.pos[:,1]) < self.globdat.block_shapes[self.mode][1], '%d > %d'%(np.max(self.pos[:,1]),self.globdat.block_shapes[self.mode][1])
+            assert np.max(self.pos[:,2]) < self.globdat.block_shapes[self.mode][2], '%d > %d'%(np.max(self.pos[:,2]),self.globdat.block_shapes[self.mode][2])
+
+            # sort according to mass
+            __sorting_indices = np.argsort(self.log_mass)
+            self.log_mass = self.log_mass[__sorting_indices]
+            self.pos = self.pos[__sorting_indices, :]
+            # compute mass intervals
+            self.dlog_mass = np.diff(self.log_mass)
+            self.dlog_mass = np.concatenate((np.array([self.dlog_mass[0]]), self.dlog_mass))
+            # TODO construct this weight function
+            self.weights = np.ones(len(self.log_mass))
+            # END TODO
+            self.weights /= np.sum(self.weights) # normalize probabilities
+    #}}}
+    def is_biased(self) :#{{{
+        return True if self.empty_fraction < 1.0 else False
+    #}}}
+    def __call__(self, N = 1) :#{{{
+        if self.rnd_generator.rand() < self.empty_fraction :
+            xx_rnd = self.rnd_generator.randint(0, high = self.xlength, size = N)
+            yy_rnd = self.rnd_generator.randint(0, high = self.ylength, size = N)
+            zz_rnd = self.rnd_generator.randint(0, high = self.zlength, size = N)
+        else :
+            __rnd_halo_index = self.rnd_generator.choice(len(self.log_mass), p = self.weights, size = N)
+            # displacements of halo center from center of the box
+            __rnd_displacements = self.rnd_generator.randint(0, high = self.globdat.DM_sidelength, size = (N,3))
+            xx_rnd = np.minimum(self.xlength-1, np.maximum(0, self.pos[__rnd_halo_index, 0] - __rnd_displacements[:,0]))
+            yy_rnd = np.minimum(self.ylength-1, np.maximum(0, self.pos[__rnd_halo_index, 1] - __rnd_displacements[:,1]))
+            zz_rnd = np.minimum(self.zlength-1, np.maximum(0, self.pos[__rnd_halo_index, 2] - __rnd_displacements[:,2]))
+        if N == 1 :
+            return xx_rnd.item(), yy_rnd.item(), zz_rnd.item()
+        else :
+            return xx_rnd, yy_rnd, zz_rnd
     #}}}
 #}}}
 
@@ -323,12 +382,19 @@ class InputData(Dataset) :#{{{
         self.files = []
         self.DM_datasets = []
         self.gas_datasets = []
+        self.position_selectors = []
         self.rnd_generators = []
-        for ii in xrange(self.globdat.num_workers) :
+        for ii in xrange(max(self.globdat.num_workers, 1)) :
             self.files.append(h5py.File(self.globdat.data_path, 'r', driver='mpio', comm=MPI.COMM_WORLD))
             self.DM_datasets.append(self.files[-1]['DM/'+self.mode])
             self.gas_datasets.append(self.files[-1]['gas/'+self.mode])
+            self.position_selectors.append(PositionSelector(
+                self.globdat, self.mode, ii, **self.globdat.sample_selector_kw
+                ))
             self.rnd_generators.append(np.random.RandomState(int(1e6*clock())+ii))
+
+        # sanity check
+        assert self.stepper is None if self.position_selectors[0].is_biased() else True
 
         # need these if we want to transform back
         self.DM_training_mean    = self.files[0]['DM'].attrs['training_mean']
@@ -341,9 +407,9 @@ class InputData(Dataset) :#{{{
         self.zz_indices_rnd = None
     #}}}
     def generate_rnd_indices(self) :#{{{
-        self.xx_indices_rnd = np.random.randint(0, high=self.xlength, size=self.globdat.Nsamples[self.mode])
-        self.yy_indices_rnd = np.random.randint(0, high=self.ylength, size=self.globdat.Nsamples[self.mode])
-        self.zz_indices_rnd = np.random.randint(0, high=self.zlength, size=self.globdat.Nsamples[self.mode])
+        self.xx_indices_rnd, self.yy_indices_rnd, self.zz_indices_rnd = self.position_selectors[0](
+            self.globdat.Nsamples[self.mode]
+            )
     #}}}
     def __generate_rnd_index(self,  __this_ID) :#{{{
         xx_rnd = self.rnd_generators[__this_ID].randint(0, high=self.xlength)
@@ -405,11 +471,11 @@ class InputData(Dataset) :#{{{
         return DM, gas
     #}}}
     def __getitem__(self, index) :#{{{
-        __this_ID = get_worker_info().id
+        __this_ID = get_worker_info().id if self.globdat.num_workers > 0 else 0
         if self.stepper is not None :
             __this_xx, __this_yy, __this_zz = self.stepper[index]
         elif self.xx_indices_rnd is None or self.yy_indices_rnd is None or self.zz_indices_rnd is None :
-            __this_xx, __this_yy, __this_zz = self.__generate_rnd_index(__this_ID)
+            __this_xx, __this_yy, __this_zz = self.position_selectors[__this_ID]()
         else :
             __this_xx, __this_yy, __this_zz = self.xx_indices_rnd[index], self.yy_indices_rnd[index], self.zz_indices_rnd[index]
 
@@ -427,12 +493,26 @@ class InputData(Dataset) :#{{{
             torch.from_numpy(np.array([__this_xx, __this_yy, __this_zz]))
             )
         # add fake dimension (channel dimension is 0 here)
+        """
+        return (
+            torch.from_numpy(np.empty((64,64,64))).unsqueeze(0),
+            torch.from_numpy(np.empty((32,32,32))).unsqueeze(0),
+            torch.from_numpy(np.array([__this_xx, __this_yy, __this_zz]))
+            )
+        """
     #}}}
     def __len__(self) :#{{{
         if self.stepper is None :
             return self.globdat.Nsamples[self.mode]
         else :
             return len(self.stepper)
+    #}}}
+    def __enter__(self) :#{{{
+        return self
+    #}}}
+    def __exit__(self, exc_type, exc_value, exc_traceback) :#{{{
+        for f in self.files :
+            f.close()
     #}}}
 #}}}
 
@@ -622,9 +702,9 @@ class Analysis(object) :#{{{
     def read_original(self) :#{{{
         self.original_field = self.__rescalings[ARGS.scaling](
             self.data.gas_datasets[0][
-                (self.globdat.DM_sidelength-self.globdat.gas_sidelength)/2 : self.xlength+(self.globdat.DM_sidelength-self.globdat.gas_sidelength)/2,
-                (self.globdat.DM_sidelength-self.globdat.gas_sidelength)/2 : self.ylength+(self.globdat.DM_sidelength-self.globdat.gas_sidelength)/2,
-                (self.globdat.DM_sidelength-self.globdat.gas_sidelength)/2 : self.zlength+(self.globdat.DM_sidelength-self.globdat.gas_sidelength)/2,
+                (self.globdat.DM_sidelength-self.globdat.gas_sidelength)/2 : self.xlength+(self.globdat.DM_sidelength+self.globdat.gas_sidelength)/2,
+                (self.globdat.DM_sidelength-self.globdat.gas_sidelength)/2 : self.ylength+(self.globdat.DM_sidelength+self.globdat.gas_sidelength)/2,
+                (self.globdat.DM_sidelength-self.globdat.gas_sidelength)/2 : self.zlength+(self.globdat.DM_sidelength+self.globdat.gas_sidelength)/2,
                 ]
             )
         self.original_field_mesh  = Mesh(self.globdat, self.original_field)
@@ -632,15 +712,17 @@ class Analysis(object) :#{{{
     #}}}
     def predict_whole_volume(self) :#{{{
         self.predicted_field = np.zeros(
-            (self.xlength, self.ylength, self.zlength),
+            (self.xlength+self.globdat.gas_sidelength, self.ylength+self.globdat.gas_sidelength, self.zlength+self.globdat.gas_sidelength),
             dtype = np.float32
             )
         loader = globdat.data_loader(self.data)
         for t, data in enumerate(loader) :
             with torch.no_grad() :
-                pred = globdat.net(
-                    torch.autograd.Variable(data[0].to(DEVICE), requires_grad = False)
-                    )[:,0,...].cpu().numpy() #
+# TODO
+#                pred = globdat.net(
+#                    torch.autograd.Variable(data[0].to(DEVICE), requires_grad = False)
+#                    )[:,0,...].cpu().numpy() #
+                pred = np.ones((data[0].shape[0],32,32,32))
             __coords = data[-1].numpy()
             for ii in xrange(pred.shape[0]) : # loop over batch dimension
                 self.predicted_field[
@@ -755,111 +837,115 @@ if __name__ == '__main__' :
             globdat.net = Network(import_module(ARGS.network).this_network)
             globdat.load_network('trained_network_%s.pt'%ARGS.output)
             
-        stepper = Stepper(globdat, 'validation')
-        validation_set = InputData(globdat, 'validation', stepper)
-
         # VISUAL OUTPUT INSPECTION
-        if False :#{{{
-            validation_loader = globdat.data_loader(validation_set)
+        if True :#{{{
+            with InputData(globdat, 'validation') as validation_set :
+                validation_loader = globdat.data_loader(validation_set)
 
-            NPAGES = 4
-            for t, data in enumerate(validation_loader) :
-                if t == NPAGES : break
+                NPAGES = 4
+                for t, data in enumerate(validation_loader) :
+                    if t == NPAGES : break
 
-                with torch.no_grad() :
-                    targ = copy.deepcopy(data[1])
-                    orig = copy.deepcopy(data[0])
-                    pred = globdat.net(
-                        torch.autograd.Variable(data[0], requires_grad=False)
-                        )
-                
-                NPlots = 8
-                fig = plt.figure(figsize=(8.5, 11.0))
-                gs0 = gs.GridSpec(NPlots/2, 2, figure=fig, wspace = 0.2)
-                for ii in xrange(NPlots) :
-                    plane_gas = np.random.randint(0, high=globdat.gas_sidelength)
-                    plane_DM  = plane_gas + (globdat.DM_sidelength-globdat.gas_sidelength)/2
-
-                    gs00 = gs.GridSpecFromSubplotSpec(
-                        2, 3, subplot_spec=gs0[ii%(NPlots/2), ii/(NPlots/2)],
-                        wspace = 0.1
-                        )
-                    ax_orig = plt.subplot(gs00[:,:2])
-                    ax_targ = plt.subplot(gs00[:1,-1])
-                    ax_pred = plt.subplot(gs00[1:,-1])
-                    fig.add_subplot(ax_orig)
-                    fig.add_subplot(ax_targ)
-                    fig.add_subplot(ax_pred)
-
-    #                if ARGS.scaling=='log' :
-                    if True :
-                        vminmax = 3 # standard deviations
-                        ax_orig.matshow(
-                            orig[ii,0,plane_DM,:,:].numpy(),
-                            extent=(0, globdat.DM_sidelength, 0, globdat.DM_sidelength),
-    #                        vmin = -vminmax, vmax = vminmax,
+                    with torch.no_grad() :
+                        targ = copy.deepcopy(data[1])
+                        orig = copy.deepcopy(data[0])
+                        pred = globdat.net(
+                            torch.autograd.Variable(data[0], requires_grad=False)
                             )
-                        ax_targ.matshow(
-                            targ[ii,0,plane_gas,:,:].numpy(),
-    #                        vmin = -vminmax, vmax = vminmax,
+                    
+                    NPlots = 8
+                    fig = plt.figure(figsize=(8.5, 11.0))
+                    gs0 = gs.GridSpec(NPlots/2, 2, figure=fig, wspace = 0.2)
+                    for ii in xrange(NPlots) :
+                        plane_gas = np.random.randint(0, high=globdat.gas_sidelength)
+                        plane_DM  = plane_gas + (globdat.DM_sidelength-globdat.gas_sidelength)/2
+
+                        gs00 = gs.GridSpecFromSubplotSpec(
+                            2, 3, subplot_spec=gs0[ii%(NPlots/2), ii/(NPlots/2)],
+                            wspace = 0.1
                             )
-                        ax_pred.matshow(
-                            pred[ii,0,plane_gas,:,:].numpy(),
-    #                        vmin = -vminmax, vmax = vminmax,
+                        ax_orig = plt.subplot(gs00[:,:2])
+                        ax_targ = plt.subplot(gs00[:1,-1])
+                        ax_pred = plt.subplot(gs00[1:,-1])
+                        fig.add_subplot(ax_orig)
+                        fig.add_subplot(ax_targ)
+                        fig.add_subplot(ax_pred)
+
+        #                if ARGS.scaling=='log' :
+                        if True :
+                            vminmax = 3 # standard deviations
+                            ax_orig.matshow(
+                                orig[ii,0,plane_DM,:,:].numpy(),
+                                extent=(0, globdat.DM_sidelength, 0, globdat.DM_sidelength),
+        #                        vmin = -vminmax, vmax = vminmax,
+                                )
+                            ax_targ.matshow(
+                                targ[ii,0,plane_gas,:,:].numpy(),
+        #                        vmin = -vminmax, vmax = vminmax,
+                                )
+                            ax_pred.matshow(
+                                pred[ii,0,plane_gas,:,:].numpy(),
+        #                        vmin = -vminmax, vmax = vminmax,
+                                )
+        #                elif ARGS.scaling=='linear' :
+        #                    ax_orig.matshow(
+        #                        np.log(np.sum(np.exp(orig[ii,0,:,:,:].numpy()), axis=0)),
+        #                        extent=(0, globdat.DM_sidelength, 0, globdat.DM_sidelength),
+        #                        )
+        #                    ax_targ.matshow(
+        #                        np.log(np.sum(targ[ii,0,:,:,:].numpy(), axis=0)),
+        #                        )
+        #                    ax_pred.matshow(
+        #                        np.log(np.sum(pred[ii,0,:,:,:].numpy(), axis=0)),
+        #                        )
+
+                        rect = Rectangle(
+                            (
+                                (globdat.DM_sidelength-globdat.gas_sidelength)/2,
+                                (globdat.DM_sidelength-globdat.gas_sidelength)/2,
+                            ),
+                            width=globdat.gas_sidelength, height=globdat.gas_sidelength,
+                            axes = ax_orig,
+                            edgecolor = 'red',
+                            fill = False,
                             )
-    #                elif ARGS.scaling=='linear' :
-    #                    ax_orig.matshow(
-    #                        np.log(np.sum(np.exp(orig[ii,0,:,:,:].numpy()), axis=0)),
-    #                        extent=(0, globdat.DM_sidelength, 0, globdat.DM_sidelength),
-    #                        )
-    #                    ax_targ.matshow(
-    #                        np.log(np.sum(targ[ii,0,:,:,:].numpy(), axis=0)),
-    #                        )
-    #                    ax_pred.matshow(
-    #                        np.log(np.sum(pred[ii,0,:,:,:].numpy(), axis=0)),
-    #                        )
+                        ax_orig.add_patch(rect)
 
-                    rect = Rectangle(
-                        (
-                            (globdat.DM_sidelength-globdat.gas_sidelength)/2,
-                            (globdat.DM_sidelength-globdat.gas_sidelength)/2,
-                        ),
-                        width=globdat.gas_sidelength, height=globdat.gas_sidelength,
-                        axes = ax_orig,
-                        edgecolor = 'red',
-                        fill = False,
-                        )
-                    ax_orig.add_patch(rect)
+                        ax_orig.set_xticks([])
+                        ax_targ.set_xticks([])
+                        ax_pred.set_xticks([])
+                        ax_orig.set_yticks([])
+                        ax_targ.set_yticks([])
+                        ax_pred.set_yticks([])
 
-                    ax_orig.set_xticks([])
-                    ax_targ.set_xticks([])
-                    ax_pred.set_xticks([])
-                    ax_orig.set_yticks([])
-                    ax_targ.set_yticks([])
-                    ax_pred.set_yticks([])
+                        ax_orig.set_ylabel('Input DM field')
+                        ax_targ.set_ylabel('Target')
+                        ax_pred.set_ylabel('Prediction')
 
-                    ax_orig.set_ylabel('Input DM field')
-                    ax_targ.set_ylabel('Target')
-                    ax_pred.set_ylabel('Prediction')
-
-                plt.suptitle('Output: %s, Scaling: %s'%(ARGS.output, ARGS.scaling), family='monospace')
-                plt.show()
-                #plt.savefig('./Outputs/comparison_target_predicted_%s_pg%d.pdf'%(ARGS.output,t))
-                #plt.cla()
+                    plt.suptitle('Output: %s, Scaling: %s'%(ARGS.output, ARGS.scaling), family='monospace')
+                    plt.show()
+                    #plt.savefig('./Outputs/comparison_target_predicted_%s_pg%d.pdf'%(ARGS.output,t))
+                    #plt.cla()
         #}}}
 
         # SUMMARY STATISTICS
-        if True :#{{{
+        if False :#{{{
+            stepper = Stepper(globdat, 'validation')
+            validation_set = InputData(globdat, 'validation', stepper)
 
             a = Analysis(globdat, validation_set, fraction=1.0)
 
-            a.read_original()
-            a.compute_powerspectrum('original')
-            a.predict_whole_volume()
             # TODO
-            np.savez('/scratch/gpfs/lthiele/whole_volume.npz', pred=a.predicted_field, orig=a.original_field)
+#            a.read_original()
+#            a.compute_powerspectrum('original')
             # END TODO
-            a.compute_powerspectrum('predicted')
+            a.predict_whole_volume()
+            plt.matshow(a.predicted_field[50,:,:])
+            plt.show()
+            # TODO
+#            np.savez('/scratch/gpfs/lthiele/whole_volume.npz', pred=a.predicted_field, orig=a.original_field)
+            # END TODO
+#            a.compute_powerspectrum('predicted')
 
             if False :
                 plt.loglog(

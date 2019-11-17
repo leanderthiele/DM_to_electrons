@@ -34,8 +34,8 @@ this_config = {
 
     # sample selector
     'sample_selector_kw': {
-                            'empty_fraction': 0.3,
-                            'pos_mass_file': '/scratch/gpfs/lthiele/important_halos.hdf5',
+                            'empty_fraction': 0.5,
+                            'pos_mass_file': '/tigress/lthiele/Illustris_300-1_Dark/important_halos.hdf5',
                           },
 
     # describes individual epochs
@@ -53,7 +53,7 @@ this_config = {
                                          },
 
 
-    'train_time': 710.0, # minutes
+    'train_time': 350.0, # minutes
 
     'input_path' : '/tigress/lthiele/boxes/hdf5_files/',
     'output_path': '/scratch/gpfs/lthiele/Outputs/',

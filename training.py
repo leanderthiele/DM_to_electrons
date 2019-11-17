@@ -21,9 +21,7 @@ import argparse
 
 """
 TODO
-add support to load pre-trained model in train mode
-factor stepper
-!!!clean the xlength issue in stepper and analysis
+set train time as command line argument
 """
 
 class _ArgParser(object) :#{{{
@@ -70,14 +68,14 @@ class _ArgParser(object) :#{{{
             help = 'Identifier of output files (loss and trained_network).'
             )
         self.__parser.add_argument(
-            '-pfid', '--powerspectrumfid',
+            '-pkfid', '--powerspectrumfid',
             nargs = '?',
-            help = 'File storing precomputed fiducial powerspectrum.'
+            help = 'File storing/to store fiducial powerspectrum.'
             )
         self.__parser.add_argument(
-            '-ppred', '--powerspectrumpred',
+            '-pspred', '--powerspectrumpred',
             nargs = '?',
-            help = 'File storing precomputed predicted powerspectrum.'
+            help = 'File storing/to store predicted powerspectrum.'
             )
         self.__parser.add_argument(
             '-v', '--verbose',
@@ -88,6 +86,13 @@ class _ArgParser(object) :#{{{
             '-p', '--parallel',
             action = 'store_true',
             help = 'If several GPUs are available.',
+            )
+        self.__parser.add_argument(
+            '--ignore_existing',
+            action = 'store_true',
+            help = 'If this flag is set, training will start at random initialization,\
+                    regardless of whether the network has already been trained and saved\
+                    to disk.'
             )
         self.__parser.add_argument(
             '-npath', '--network_path',
@@ -119,6 +124,7 @@ _names = {#{{{
     'ConvTranspose': nn.ConvTranspose3d,
     'BatchNorm': nn.BatchNorm3d,
     'ReLU': nn.ReLU,
+    'LeakyReLU': nn.LeakyReLU,
     'MSELoss': nn.MSELoss,
     'L1Loss': nn.L1Loss,
     'Adam': torch.optim.Adam,
@@ -254,9 +260,13 @@ class GlobalData(object) :#{{{
     #}}}
     def load_network(self, name) :#{{{
         # need to initialize network first
-        self.net.load_state_dict(torch.load(self.__output_path+name, map_location='cuda:0' if GPU_AVAIL else 'cpu'))
-        self.net.to(DEVICE)
-        self.net.eval()
+        try :
+            self.net.load_state_dict(torch.load(self.__output_path+name, map_location='cuda:0' if GPU_AVAIL else 'cpu'))
+            if ARGS.verbose :
+                print 'Loaded network %s from disk.'%name
+        except IOError :
+            if ARGS.verbose :
+                print 'Failed to load network %s from disk.\n Starting training with random initialization.'%name
     #}}}
 #}}}
 
@@ -274,32 +284,35 @@ class Stepper(object) :#{{{
     #}}}
     def __max_index(self, total_length) :#{{{
         if total_length%self.globdat.gas_sidelength == 0 : # gas sidelength fits perfectly
-            return total_length/self.globdat.gas_sidelength
+            return total_length/self.globdat.gas_sidelength # CORRECT
         else : # need some patching at the end
-            return total_length/self.globdat.gas_sidelength + 1
-    #}}}
-    def __index_3D(self, index) :#{{{
-        return (
-            index/((self.max_y_index+1)*(self.max_z_index+1)),
-            (index/(self.max_z_index+1))%(self.max_y_index+1),
-            index%(self.max_z_index+1),
-            )
-    #}}}
-    def __real_index(self, index, total_length) :#{{{
-        if index < total_length/self.globdat.gas_sidelength + 1 :
-            return index * self.globdat.gas_sidelength
-        elif index == total_length/self.globdat.gas_sidelength + 1 :
-            return total_length - self.globdat.gas_sidelength
+            return total_length/self.globdat.gas_sidelength + 1 # CORRECT
     #}}}
     def __getitem__(self, index) :#{{{
-        x_index, y_index, z_index = self.__index_3D(index)
-        assert x_index <= self.max_x_index
-        assert y_index <= self.max_y_index
-        assert z_index <= self.max_z_index
-        x_index = self.__real_index(x_index, self.xlength)
-        y_index = self.__real_index(y_index, self.ylength)
-        z_index = self.__real_index(z_index, self.zlength)
-        return x_index, y_index, z_index
+        __xx = index%(self.max_x_index+1)
+        __yy = (index/(self.max_x_index+1))%(self.max_y_index+1)
+        __zz = index/((self.max_x_index+1)*(self.max_y_index+1))
+
+        if __xx < self.max_x_index :
+            __xx *= self.globdat.gas_sidelength
+        elif __xx == self.max_x_index :
+            __xx = self.xlength
+        else :
+            raise RuntimeError('I should not be here.')
+        if __yy < self.max_y_index :
+            __yy *= self.globdat.gas_sidelength
+        elif __yy == self.max_y_index :
+            __yy = self.ylength
+        else :
+            raise RuntimeError('I should not be here.')
+        if __zz < self.max_z_index :
+            __zz *= self.globdat.gas_sidelength
+        elif __zz == self.max_z_index :
+            __zz = self.zlength
+        else :
+            raise RuntimeError('I should not be here.')
+
+        return __xx, __yy, __zz
     #}}}
     def __len__(self) :#{{{
         return (self.max_x_index+1)*(self.max_y_index+1)*(self.max_z_index+1)
@@ -347,16 +360,16 @@ class PositionSelector(object) :#{{{
     #}}}
     def __call__(self, N = 1) :#{{{
         if self.rnd_generator.rand() < self.empty_fraction :
-            xx_rnd = self.rnd_generator.randint(0, high = self.xlength, size = N)
-            yy_rnd = self.rnd_generator.randint(0, high = self.ylength, size = N)
-            zz_rnd = self.rnd_generator.randint(0, high = self.zlength, size = N)
+            xx_rnd = self.rnd_generator.randint(0, high = self.xlength+1, size = N)
+            yy_rnd = self.rnd_generator.randint(0, high = self.ylength+1, size = N)
+            zz_rnd = self.rnd_generator.randint(0, high = self.zlength+1, size = N)
         else :
             __rnd_halo_index = self.rnd_generator.choice(len(self.log_mass), p = self.weights, size = N)
             # displacements of halo center from center of the box
             __rnd_displacements = self.rnd_generator.randint(0, high = self.globdat.DM_sidelength, size = (N,3))
-            xx_rnd = np.minimum(self.xlength-1, np.maximum(0, self.pos[__rnd_halo_index, 0] - __rnd_displacements[:,0]))
-            yy_rnd = np.minimum(self.ylength-1, np.maximum(0, self.pos[__rnd_halo_index, 1] - __rnd_displacements[:,1]))
-            zz_rnd = np.minimum(self.zlength-1, np.maximum(0, self.pos[__rnd_halo_index, 2] - __rnd_displacements[:,2]))
+            xx_rnd = np.minimum(self.xlength, np.maximum(0, self.pos[__rnd_halo_index, 0] - __rnd_displacements[:,0]))
+            yy_rnd = np.minimum(self.ylength, np.maximum(0, self.pos[__rnd_halo_index, 1] - __rnd_displacements[:,1]))
+            zz_rnd = np.minimum(self.zlength, np.maximum(0, self.pos[__rnd_halo_index, 2] - __rnd_displacements[:,2]))
         if N == 1 :
             return xx_rnd.item(), yy_rnd.item(), zz_rnd.item()
         else :
@@ -411,25 +424,19 @@ class InputData(Dataset) :#{{{
             self.globdat.Nsamples[self.mode]
             )
     #}}}
-    def __generate_rnd_index(self,  __this_ID) :#{{{
-        xx_rnd = self.rnd_generators[__this_ID].randint(0, high=self.xlength)
-        yy_rnd = self.rnd_generators[__this_ID].randint(0, high=self.ylength)
-        zz_rnd = self.rnd_generators[__this_ID].randint(0, high=self.zlength)
-        return xx_rnd, yy_rnd, zz_rnd
-    #}}}
-    def __randomly_transform(self, arr1, arr2, __this_ID) :#{{{
+    def __randomly_transform(self, arr1, arr2, __ID) :#{{{
         # reflections
-        if self.rnd_generators[__this_ID].rand() < 0.5 :
+        if self.rnd_generators[__ID].rand() < 0.5 :
             arr1 = arr1[::-1,:,:]
             arr1 = arr1[::-1,:,:]
-        if self.rnd_generators[__this_ID].rand() < 0.5 :
+        if self.rnd_generators[__ID].rand() < 0.5 :
             arr1 = arr1[:,::-1,:]
             arr2 = arr2[:,::-1,:]
-        if self.rnd_generators[__this_ID].rand() < 0.5 :
+        if self.rnd_generators[__ID].rand() < 0.5 :
             arr1 = arr1[:,::-1]
             arr2 = arr2[:,::-1]
         # transpositions
-        prand = self.rnd_generators[__this_ID].rand()
+        prand = self.rnd_generators[__ID].rand()
         if prand < 1./6. :
             arr1 = np.transpose(arr1, axes=(0,2,1))
             arr2 = np.transpose(arr2, axes=(0,2,1))
@@ -454,16 +461,16 @@ class InputData(Dataset) :#{{{
             index/(self.ylength*self.xlength)
             )
     #}}}
-    def getitem_deterministic(self, xx, yy, zz, __this_ID) :#{{{
-        assert xx < self.xlength
-        assert yy < self.ylength
-        assert zz < self.zlength
-        DM = self.DM_datasets[__this_ID][
+    def getitem_deterministic(self, xx, yy, zz, __ID) :#{{{
+        assert xx <= self.xlength
+        assert yy <= self.ylength
+        assert zz <= self.zlength
+        DM = self.DM_datasets[__ID][
             xx : xx+self.globdat.DM_sidelength,
             yy : yy+self.globdat.DM_sidelength,
             zz : zz+self.globdat.DM_sidelength
             ]
-        gas = self.gas_datasets[__this_ID][
+        gas = self.gas_datasets[__ID][
             xx+(self.globdat.DM_sidelength-self.globdat.gas_sidelength)/2 : xx+(self.globdat.DM_sidelength+self.globdat.gas_sidelength)/2,
             yy+(self.globdat.DM_sidelength-self.globdat.gas_sidelength)/2 : yy+(self.globdat.DM_sidelength+self.globdat.gas_sidelength)/2,
             zz+(self.globdat.DM_sidelength-self.globdat.gas_sidelength)/2 : zz+(self.globdat.DM_sidelength+self.globdat.gas_sidelength)/2,
@@ -471,33 +478,34 @@ class InputData(Dataset) :#{{{
         return DM, gas
     #}}}
     def __getitem__(self, index) :#{{{
-        __this_ID = get_worker_info().id if self.globdat.num_workers > 0 else 0
+        __ID = get_worker_info().id if self.globdat.num_workers > 0 else 0
         if self.stepper is not None :
-            __this_xx, __this_yy, __this_zz = self.stepper[index]
+            __xx, __yy, __zz = self.stepper[index]
         elif self.xx_indices_rnd is None or self.yy_indices_rnd is None or self.zz_indices_rnd is None :
-            __this_xx, __this_yy, __this_zz = self.position_selectors[__this_ID]()
+            __xx, __yy, __zz = self.position_selectors[__ID]()
         else :
-            __this_xx, __this_yy, __this_zz = self.xx_indices_rnd[index], self.yy_indices_rnd[index], self.zz_indices_rnd[index]
+            __xx, __yy, __zz = self.xx_indices_rnd[index], self.yy_indices_rnd[index], self.zz_indices_rnd[index]
 
         DM, gas = self.getitem_deterministic(
-            __this_xx, __this_yy, __this_zz,
-            __this_ID
+            __xx, __yy, __zz,
+            __ID
             )
         if self.do_random_transformations :
-            DM, gas = self.__randomly_transform(DM, gas, __this_ID)
+            DM, gas = self.__randomly_transform(DM, gas, __ID)
         assert DM.shape[0]  == DM.shape[1]  == DM.shape[2]  == self.globdat.DM_sidelength,  DM.shape
         assert gas.shape[0] == gas.shape[1] == gas.shape[2] == self.globdat.gas_sidelength, gas.shape
 
         return (
-            torch.from_numpy(DM.copy()).unsqueeze(0), torch.from_numpy(gas.copy()).unsqueeze(0),
-            torch.from_numpy(np.array([__this_xx, __this_yy, __this_zz]))
+            torch.from_numpy(DM.copy()).unsqueeze(0),
+            torch.from_numpy(gas.copy()).unsqueeze(0),
+            torch.from_numpy(np.array([__xx, __yy, __zz])),
             )
         # add fake dimension (channel dimension is 0 here)
         """
         return (
             torch.from_numpy(np.empty((64,64,64))).unsqueeze(0),
             torch.from_numpy(np.empty((32,32,32))).unsqueeze(0),
-            torch.from_numpy(np.array([__this_xx, __this_yy, __this_zz]))
+            torch.from_numpy(np.array([__xx, __yy, __zz])),
             )
         """
     #}}}
@@ -676,15 +684,10 @@ class Mesh(object) :#{{{
 #}}}
 
 class Analysis(object) :#{{{
-    def __init__(self, globdat, data, **kwargs) :#{{{
+    def __init__(self, globdat, data) :#{{{
         # data is instance of InputData
         self.globdat = globdat
         self.data = data
-        self.fraction = kwargs['fraction'] if 'fraction' in kwargs else 1.0
-
-        self.xlength = int(self.fraction*self.data.xlength)
-        self.ylength = int(self.fraction*self.data.ylength)
-        self.zlength = int(self.fraction*self.data.zlength)
 
         self.__rescalings = {
             'log'    : lambda x : np.exp(x*self.data.gas_training_stddev+self.data.gas_training_mean),
@@ -702,9 +705,9 @@ class Analysis(object) :#{{{
     def read_original(self) :#{{{
         self.original_field = self.__rescalings[ARGS.scaling](
             self.data.gas_datasets[0][
-                (self.globdat.DM_sidelength-self.globdat.gas_sidelength)/2 : self.xlength+(self.globdat.DM_sidelength+self.globdat.gas_sidelength)/2,
-                (self.globdat.DM_sidelength-self.globdat.gas_sidelength)/2 : self.ylength+(self.globdat.DM_sidelength+self.globdat.gas_sidelength)/2,
-                (self.globdat.DM_sidelength-self.globdat.gas_sidelength)/2 : self.zlength+(self.globdat.DM_sidelength+self.globdat.gas_sidelength)/2,
+                (self.globdat.DM_sidelength-self.globdat.gas_sidelength)/2 : self.data.xlength+(self.globdat.DM_sidelength+self.globdat.gas_sidelength)/2,
+                (self.globdat.DM_sidelength-self.globdat.gas_sidelength)/2 : self.data.ylength+(self.globdat.DM_sidelength+self.globdat.gas_sidelength)/2,
+                (self.globdat.DM_sidelength-self.globdat.gas_sidelength)/2 : self.data.zlength+(self.globdat.DM_sidelength+self.globdat.gas_sidelength)/2,
                 ]
             )
         self.original_field_mesh  = Mesh(self.globdat, self.original_field)
@@ -712,17 +715,15 @@ class Analysis(object) :#{{{
     #}}}
     def predict_whole_volume(self) :#{{{
         self.predicted_field = np.zeros(
-            (self.xlength+self.globdat.gas_sidelength, self.ylength+self.globdat.gas_sidelength, self.zlength+self.globdat.gas_sidelength),
+            (self.data.xlength+self.globdat.gas_sidelength, self.data.ylength+self.globdat.gas_sidelength, self.data.zlength+self.globdat.gas_sidelength),
             dtype = np.float32
             )
         loader = globdat.data_loader(self.data)
         for t, data in enumerate(loader) :
             with torch.no_grad() :
-# TODO
-#                pred = globdat.net(
-#                    torch.autograd.Variable(data[0].to(DEVICE), requires_grad = False)
-#                    )[:,0,...].cpu().numpy() #
-                pred = np.ones((data[0].shape[0],32,32,32))
+                pred = globdat.net(
+                    torch.autograd.Variable(data[0].to(DEVICE), requires_grad = False)
+                    )[:,0,...].cpu().numpy()
             __coords = data[-1].numpy()
             for ii in xrange(pred.shape[0]) : # loop over batch dimension
                 self.predicted_field[
@@ -836,9 +837,12 @@ if __name__ == '__main__' :
         except RuntimeError :
             globdat.net = Network(import_module(ARGS.network).this_network)
             globdat.load_network('trained_network_%s.pt'%ARGS.output)
+
+        globdat.net.to(DEVICE)
+        globdat.net.eval()
             
         # VISUAL OUTPUT INSPECTION
-        if True :#{{{
+        if False :#{{{
             with InputData(globdat, 'validation') as validation_set :
                 validation_loader = globdat.data_loader(validation_set)
 
@@ -929,40 +933,33 @@ if __name__ == '__main__' :
         #}}}
 
         # SUMMARY STATISTICS
-        if False :#{{{
+        if True :#{{{
             stepper = Stepper(globdat, 'validation')
-            validation_set = InputData(globdat, 'validation', stepper)
+            with InputData(globdat, 'validation', stepper) as validation_set :
 
-            a = Analysis(globdat, validation_set, fraction=1.0)
+                a = Analysis(globdat, validation_set)
 
-            # TODO
-#            a.read_original()
-#            a.compute_powerspectrum('original')
-            # END TODO
-            a.predict_whole_volume()
-            plt.matshow(a.predicted_field[50,:,:])
-            plt.show()
-            # TODO
-#            np.savez('/scratch/gpfs/lthiele/whole_volume.npz', pred=a.predicted_field, orig=a.original_field)
-            # END TODO
-#            a.compute_powerspectrum('predicted')
+                a.read_original()
+                a.compute_powerspectrum('original')
+                a.predict_whole_volume()
+                np.savez('/scratch/gpfs/lthiele/whole_volume.npz', pred=a.predicted_field, orig=a.original_field)
+                a.compute_powerspectrum('predicted')
 
-            if False :
-                plt.loglog(
-                    a.original_power_spectrum['k'],
-                    a.original_power_spectrum['P'],
-                    label = 'original',
-                    )
-                plt.loglog(
-                    a.predicted_power_spectrum['k'],
-                    a.predicted_power_spectrum['P'],
-                    label = 'predicted',
-                    )
-                plt.xlabel('k')
-                plt.ylabel('P(k)')
-                plt.legend()
-                plt.show()
-
+                if False :
+                    plt.loglog(
+                        a.original_power_spectrum['k'],
+                        a.original_power_spectrum['P'],
+                        label = 'original',
+                        )
+                    plt.loglog(
+                        a.predicted_power_spectrum['k'],
+                        a.predicted_power_spectrum['P'],
+                        label = 'predicted',
+                        )
+                    plt.xlabel('k')
+                    plt.ylabel('P(k)')
+                    plt.legend()
+                    plt.show()
         #}}}
     #}}}
 
@@ -972,10 +969,15 @@ if __name__ == '__main__' :
         globdat = GlobalData(*CONFIGS)
 
         globdat.net = Network(import_module(ARGS.network).this_network)
+
         if ARGS.verbose :
             print 'Putting network in parallel mode.'
         globdat.net = nn.DataParallel(globdat.net)
+        if not ARGS.ignore_existing :
+            globdat.load_network('trained_network_%s.pt'%ARGS.output)
+
         globdat.net.to(DEVICE)
+
         if ARGS.verbose :
             print 'Summary of %s'%ARGS.network
             summary(globdat.net, (1, globdat.DM_sidelength, globdat.DM_sidelength, globdat.DM_sidelength))
@@ -984,59 +986,60 @@ if __name__ == '__main__' :
         optimizer = globdat.optimizer()
         lr_scheduler = globdat.lr_scheduler(optimizer)
 
-        training_set   = InputData(globdat, 'training')
-        validation_set = InputData(globdat, 'validation')
-
-        # keep the validation data always the same
-        # (reduces noise in the output and makes diagnostics easier)
-        validation_set.generate_rnd_indices()
-        validation_loader = globdat.data_loader(validation_set)
-
-        while True : # train until time is up
-
+        with InputData(globdat, 'training') as training_set :
             training_loader = globdat.data_loader(training_set)
 
-            for t, data in enumerate(training_loader) :
+            with InputData(globdat, 'validation') as validation_set :
+                # keep the validation data always the same
+                # (reduces noise in the output and makes diagnostics easier)
+                validation_set.generate_rnd_indices()
+                validation_loader = globdat.data_loader(validation_set)
 
-                globdat.net.train()
-                optimizer.zero_grad()
-                loss = loss_function(
-                    globdat.net(
-                        torch.autograd.Variable(data[0].to(DEVICE), requires_grad=False)
-                        ),
-                    torch.autograd.Variable(data[1].to(DEVICE), requires_grad=False)
-                    )
-                
-                if ARGS.verbose and not GPU_AVAIL :
-                    print '\ttraining loss : %.3e'%loss.item()
+                while True : # train until time is up
 
-                globdat.update_training_loss(loss.item())
-                loss.backward()
-                optimizer.step()
-                
-                if globdat.stop_training() :
+                    # loop over one epoch
+                    globdat.net.train()
+                    for t, data in enumerate(training_loader) :
+
+                        optimizer.zero_grad()
+                        loss = loss_function(
+                            globdat.net(
+                                torch.autograd.Variable(data[0].to(DEVICE), requires_grad=False)
+                                ),
+                            torch.autograd.Variable(data[1].to(DEVICE), requires_grad=False)
+                            )
+                        
+                        if ARGS.verbose and not GPU_AVAIL :
+                            print '\ttraining loss : %.3e'%loss.item()
+
+                        globdat.update_training_loss(loss.item())
+                        loss.backward()
+                        optimizer.step()
+                        
+                        if globdat.stop_training() :
+                            globdat.save_loss('loss_%s.npz'%ARGS.output)
+                            globdat.save_network('trained_network_%s.pt'%ARGS.output)
+                            sys.exit(0)
+
+                    # evaluate on the validation set
+                    globdat.net.eval()
+                    _loss = 0.0
+                    for t_val, data_val in enumerate(validation_loader) :
+                        with torch.no_grad() :
+                            _loss += loss_function(
+                                globdat.net(
+                                    torch.autograd.Variable(data[0], requires_grad=False).to(DEVICE)
+                                    ),
+                                torch.autograd.Variable(data[1], requires_grad=False).to(DEVICE)
+                                ).item()
+
+                    if ARGS.verbose :
+                        print 'validation loss : %.6e'%(_loss/(t_val+1.0))
+                    globdat.update_validation_loss(_loss/(t_val+1.0))
+
+                    if lr_scheduler is not None :
+                        lr_scheduler.step(_loss)
+
                     globdat.save_loss('loss_%s.npz'%ARGS.output)
                     globdat.save_network('trained_network_%s.pt'%ARGS.output)
-                    sys.exit(0)
-
-            globdat.net.eval()
-            _loss = 0.0
-            for t_val, data_val in enumerate(validation_loader) :
-                with torch.no_grad() :
-                    _loss += loss_function(
-                        globdat.net(
-                            torch.autograd.Variable(data[0], requires_grad=False).to(DEVICE)
-                            ),
-                        torch.autograd.Variable(data[1], requires_grad=False).to(DEVICE)
-                        ).item()
-
-            if ARGS.verbose :
-                print 'validation loss : %.6e'%(_loss/(t_val+1.0))
-            globdat.update_validation_loss(_loss/(t_val+1.0))
-
-            if lr_scheduler is not None :
-                lr_scheduler.step(_loss)
-
-            globdat.save_loss('loss_%s.npz'%ARGS.output)
-            globdat.save_network('trained_network_%s.pt'%ARGS.output)
     #}}}

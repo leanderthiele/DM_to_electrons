@@ -1,4 +1,5 @@
 import copy
+import datetime
 from time import time, clock
 from os import system
 import sys
@@ -66,6 +67,13 @@ class _ArgParser(object) :#{{{
             nargs = '?',
             required = True,
             help = 'Identifier of output files (loss and trained_network).'
+            )
+        self.__parser.add_argument(
+            '-t', '--time',
+            nargs = '?',
+            type = float,
+            default = 24.0,
+            help = 'Maximum runtime in hrs.'
             )
         self.__parser.add_argument(
             '-pkfid', '--powerspectrumfid',
@@ -171,7 +179,6 @@ class GlobalData(object) :#{{{
         self.__optimizer_kw     = configs[0]['optimizer_%s_kw'%configs[0]['optimizer']]
 
         self.Nsamples           = configs[0]['Nsamples']
-        self.__train_time       = configs[0]['train_time'] # minutes
 
         self.__data_loader_kw   = configs[0]['data_loader_kw']
         self.num_workers = self.__data_loader_kw['num_workers'] if 'num_workers' in self.__data_loader_kw else 1
@@ -253,7 +260,7 @@ class GlobalData(object) :#{{{
             )
     #}}}
     def stop_training(self) :#{{{
-        return (time()-START_TIME)/60. > self.__train_time
+        return (time()-START_TIME)/60./60. > ARGS.time
     #}}}
     def save_network(self, name) :#{{{
         torch.save(self.net.state_dict(), self.__output_path+name)

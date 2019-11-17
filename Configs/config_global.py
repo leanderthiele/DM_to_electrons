@@ -52,9 +52,6 @@ this_config = {
                                             'verbose': True,
                                          },
 
-
-    'train_time': 350.0, # minutes
-
     'input_path' : '/tigress/lthiele/boxes/hdf5_files/',
     'output_path': '/scratch/gpfs/lthiele/Outputs/',
 }

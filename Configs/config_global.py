@@ -11,6 +11,7 @@ this_config = {
     # loss function
     'loss_function': 'L1Loss',
     'loss_function_MSELoss_kw': {
+                                    'reduction': 'mean',
                                 },
     'loss_function_L1Loss_kw' : {
                                     'reduction': 'mean', # keep 'mean' to compare different batch sizes
@@ -30,6 +31,7 @@ this_config = {
                         'batch_size': 16,
                         'num_workers': 4,
                         'shuffle': False,
+                        'drop_last': True,
                       },
 
     # sample selector

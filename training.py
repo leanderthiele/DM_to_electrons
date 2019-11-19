@@ -22,13 +22,21 @@ import argparse
 
 """
 TODO
-set train time as command line argument
+save additional information with trained network
+https://stackoverflow.com/questions/42703500/best-way-to-save-a-trained-model-in-pytorch
+e.g.    -- size of input (DM, gas, box size) [raise RuntimeError]
+        -- scaling [raise RuntimeError]
+        -- empty_fraction [print Warning]
+
+fix rescaling (make member fct of InputData?)
+
+!!! LOSS SEEMS PERIODIC -- WHAT'S GOING ON???
 """
 
 class _ArgParser(object) :#{{{
     def __init__(self) :#{{{
         _modes    = ['train', 'valid', ]
-        _scalings = ['log', 'linear', 'sqrt', 'cbrt', ]
+        _scalings = ['log', 'linear', 'sqrt', 'cbrt', 'scaled', ]
 
         self.__parser = argparse.ArgumentParser(
             description='Code to train on DM only sims and hydro sims to \
@@ -127,7 +135,7 @@ class _ArgParser(object) :#{{{
     #}}}
 #}}}
 
-_names = {#{{{
+_namesofplaces = {#{{{
     'Conv': nn.Conv3d,
     'ConvTranspose': nn.ConvTranspose3d,
     'BatchNorm': nn.BatchNorm3d,
@@ -172,10 +180,10 @@ class GlobalData(object) :#{{{
         assert not self.DM_sidelength%2,  'Only even DM_sidelength is supported.'
 
         # training hyperparameters
-        self.__loss_function    = _names[configs[0]['loss_function']]
+        self.__loss_function    = _namesofplaces[configs[0]['loss_function']]
         self.__loss_function_kw = configs[0]['loss_function_%s_kw'%configs[0]['loss_function']]
 
-        self.__optimizer        = _names[configs[0]['optimizer']]
+        self.__optimizer        = _namesofplaces[configs[0]['optimizer']]
         self.__optimizer_kw     = configs[0]['optimizer_%s_kw'%configs[0]['optimizer']]
 
         self.Nsamples           = configs[0]['Nsamples']
@@ -183,7 +191,7 @@ class GlobalData(object) :#{{{
         self.__data_loader_kw   = configs[0]['data_loader_kw']
         self.num_workers = self.__data_loader_kw['num_workers'] if 'num_workers' in self.__data_loader_kw else 1
 
-        self.__lr_scheduler     = _names[configs[0]['lr_scheduler']]
+        self.__lr_scheduler     = _namesofplaces[configs[0]['lr_scheduler']]
         if self.__lr_scheduler is not None :
             self.__lr_scheduler_kw = configs[0]['lr_scheduler_%s_kw'%configs[0]['lr_scheduler']]
 
@@ -337,13 +345,13 @@ class PositionSelector(object) :#{{{
 
         self.empty_fraction = kwargs['empty_fraction'] if 'empty_fraction' in kwargs else 1.0
         self.rnd_generator = np.random.RandomState(int(1e6*clock()) + seed)
-        assert self.empty_fraction >= 0.0
+        assert 0.0 <= self.empty_fraction <= 1.0
         if self.empty_fraction < 1.0 :
-#            with h5py.File(kwargs['pos_mass_file'], 'r') as f :
             with h5py.File(kwargs['pos_mass_file'], 'r') as f :
                 self.pos  = f['/%s/coords'%self.mode][:] # kpc/h
                 self.log_mass = np.log10(1e10*f['/%s/M500c'%self.mode][:]) # log Msun/h
             assert self.pos.shape[0] == self.log_mass.shape[0]
+            assert self.pos.shape[1] == 3
             # cnvert to pixel coordinates
             self.pos = (self.pos*float(self.globdat.box_sidelength)/(1e3*self.globdat.box_size)).astype(int)
             assert np.max(self.pos[:,0]) < self.globdat.block_shapes[self.mode][0], '%d > %d'%(np.max(self.pos[:,0]),self.globdat.block_shapes[self.mode][0])
@@ -365,22 +373,19 @@ class PositionSelector(object) :#{{{
     def is_biased(self) :#{{{
         return True if self.empty_fraction < 1.0 else False
     #}}}
-    def __call__(self, N = 1) :#{{{
+    def __call__(self) :#{{{
         if self.rnd_generator.rand() < self.empty_fraction :
-            xx_rnd = self.rnd_generator.randint(0, high = self.xlength+1, size = N)
-            yy_rnd = self.rnd_generator.randint(0, high = self.ylength+1, size = N)
-            zz_rnd = self.rnd_generator.randint(0, high = self.zlength+1, size = N)
+            xx_rnd = self.rnd_generator.randint(0, high = self.xlength+1)
+            yy_rnd = self.rnd_generator.randint(0, high = self.ylength+1)
+            zz_rnd = self.rnd_generator.randint(0, high = self.zlength+1)
         else :
-            __rnd_halo_index = self.rnd_generator.choice(len(self.log_mass), p = self.weights, size = N)
+            __rnd_halo_index = self.rnd_generator.choice(len(self.log_mass), p = self.weights)
             # displacements of halo center from center of the box
-            __rnd_displacements = self.rnd_generator.randint(0, high = self.globdat.DM_sidelength, size = (N,3))
-            xx_rnd = np.minimum(self.xlength, np.maximum(0, self.pos[__rnd_halo_index, 0] - __rnd_displacements[:,0]))
-            yy_rnd = np.minimum(self.ylength, np.maximum(0, self.pos[__rnd_halo_index, 1] - __rnd_displacements[:,1]))
-            zz_rnd = np.minimum(self.zlength, np.maximum(0, self.pos[__rnd_halo_index, 2] - __rnd_displacements[:,2]))
-        if N == 1 :
-            return xx_rnd.item(), yy_rnd.item(), zz_rnd.item()
-        else :
-            return xx_rnd, yy_rnd, zz_rnd
+            __rnd_displacements = self.rnd_generator.randint(0, high = self.globdat.DM_sidelength, size = 3)
+            xx_rnd = np.minimum(self.xlength, np.maximum(0, self.pos[__rnd_halo_index, 0] - __rnd_displacements[0]))
+            yy_rnd = np.minimum(self.ylength, np.maximum(0, self.pos[__rnd_halo_index, 1] - __rnd_displacements[1]))
+            zz_rnd = np.minimum(self.zlength, np.maximum(0, self.pos[__rnd_halo_index, 2] - __rnd_displacements[2]))
+        return xx_rnd, yy_rnd, zz_rnd
     #}}}
 #}}}
 
@@ -417,19 +422,22 @@ class InputData(Dataset) :#{{{
         assert self.stepper is None if self.position_selectors[0].is_biased() else True
 
         # need these if we want to transform back
-        self.DM_training_mean    = self.files[0]['DM'].attrs['training_mean']
-        self.DM_training_stddev  = self.files[0]['DM'].attrs['training_stddev']
-        self.gas_training_mean   = self.files[0]['gas'].attrs['training_mean']
-        self.gas_training_stddev = self.files[0]['gas'].attrs['training_stddev']
+        # TODO
+        #self.DM_training_mean    = self.files[0]['DM'].attrs['training_mean']
+        #self.DM_training_stddev  = self.files[0]['DM'].attrs['training_stddev']
+        #self.gas_training_mean   = self.files[0]['gas'].attrs['training_mean']
+        #self.gas_training_stddev = self.files[0]['gas'].attrs['training_stddev']
         
         self.xx_indices_rnd = None
         self.yy_indices_rnd = None
         self.zz_indices_rnd = None
     #}}}
     def generate_rnd_indices(self) :#{{{
-        self.xx_indices_rnd, self.yy_indices_rnd, self.zz_indices_rnd = self.position_selectors[0](
-            self.globdat.Nsamples[self.mode]
-            )
+        self.xx_indices_rnd = np.empty(self.globdat.Nsamples[self.mode])
+        self.yy_indices_rnd = np.empty(self.globdat.Nsamples[self.mode])
+        self.zz_indices_rnd = np.empty(self.globdat.Nsamples[self.mode])
+        for ii in xrange(self.globdat.Nsamples[self.mode]) :
+            self.xx_indices_rnd[ii], self.yy_indices_rnd[ii], self.zz_indices_rnd[ii] = self.position_selectors[0]()
     #}}}
     def __randomly_transform(self, arr1, arr2, __ID) :#{{{
         # reflections
@@ -487,10 +495,13 @@ class InputData(Dataset) :#{{{
     def __getitem__(self, index) :#{{{
         __ID = get_worker_info().id if self.globdat.num_workers > 0 else 0
         if self.stepper is not None :
+            assert ARGS.mode != 'train', 'It does not make sense to have a stepper in training mode.'
+            assert self.mode != 'training', 'It does not make sense to have a stepper in training mode.'
             __xx, __yy, __zz = self.stepper[index]
         elif self.xx_indices_rnd is None or self.yy_indices_rnd is None or self.zz_indices_rnd is None :
             __xx, __yy, __zz = self.position_selectors[__ID]()
         else :
+            assert self.mode != 'training', 'This will produce always the same samples, not recommended in training mode.'
             __xx, __yy, __zz = self.xx_indices_rnd[index], self.yy_indices_rnd[index], self.zz_indices_rnd[index]
 
         DM, gas = self.getitem_deterministic(
@@ -577,7 +588,7 @@ class BasicLayer(nn.Module) :#{{{
             )
 
         if self.__merged_dict['conv'] is not None :
-            self.__conv_fct = _names[self.__merged_dict['conv']](
+            self.__conv_fct = _namesofplaces[self.__merged_dict['conv']](
                 self.__merged_dict['inplane'], self.__merged_dict['outplane'],
                 **self.__merged_dict['conv_kw']
                 )
@@ -590,7 +601,7 @@ class BasicLayer(nn.Module) :#{{{
             self.__crop_fct = Identity()
 
         if self.__merged_dict['batch_norm'] is not None :
-            self.__batch_norm_fct = _names[self.__merged_dict['batch_norm']](
+            self.__batch_norm_fct = _namesofplaces[self.__merged_dict['batch_norm']](
                 self.__merged_dict['outplane'],
                 **self.__merged_dict['batch_norm_kw']
                 )
@@ -598,7 +609,7 @@ class BasicLayer(nn.Module) :#{{{
             self.__batch_norm_fct = Identity()
         
         if self.__merged_dict['activation'] is not None :
-            self.__activation_fct = _names[self.__merged_dict['activation']](
+            self.__activation_fct = _namesofplaces[self.__merged_dict['activation']](
                 **self.__merged_dict['activation_kw']
                 )
         else :
@@ -849,7 +860,7 @@ if __name__ == '__main__' :
         globdat.net.eval()
             
         # VISUAL OUTPUT INSPECTION
-        if False :#{{{
+        if True :#{{{
             with InputData(globdat, 'validation') as validation_set :
                 validation_loader = globdat.data_loader(validation_set)
 
@@ -940,7 +951,7 @@ if __name__ == '__main__' :
         #}}}
 
         # SUMMARY STATISTICS
-        if True :#{{{
+        if False :#{{{
             stepper = Stepper(globdat, 'validation')
             with InputData(globdat, 'validation', stepper) as validation_set :
 

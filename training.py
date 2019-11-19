@@ -104,7 +104,7 @@ class _ArgParser(object) :#{{{
             help = 'If several GPUs are available.',
             )
         self.__parser.add_argument(
-            '--ignore_existing',
+            '--ignoreexisting',
             action = 'store_true',
             help = 'If this flag is set, training will start at random initialization,\
                     regardless of whether the network has already been trained and saved\
@@ -347,6 +347,8 @@ class PositionSelector(object) :#{{{
         self.rnd_generator = np.random.RandomState(int(1e6*clock()) + seed)
         assert 0.0 <= self.empty_fraction <= 1.0
         if self.empty_fraction < 1.0 :
+            if ARGS.verbose :
+                print 'In PositionSelector(%s) : Reading %s.'%(self.mode, kwargs['pos_mass_file'])
             with h5py.File(kwargs['pos_mass_file'], 'r') as f :
                 self.pos  = f['/%s/coords'%self.mode][:] # kpc/h
                 self.log_mass = np.log10(1e10*f['/%s/M500c'%self.mode][:]) # log Msun/h
@@ -371,7 +373,7 @@ class PositionSelector(object) :#{{{
             self.weights /= np.sum(self.weights) # normalize probabilities
     #}}}
     def is_biased(self) :#{{{
-        return True if self.empty_fraction < 1.0 else False
+        return self.empty_fraction < 1.0
     #}}}
     def __call__(self) :#{{{
         if self.rnd_generator.rand() < self.empty_fraction :
@@ -433,9 +435,11 @@ class InputData(Dataset) :#{{{
         self.zz_indices_rnd = None
     #}}}
     def generate_rnd_indices(self) :#{{{
-        self.xx_indices_rnd = np.empty(self.globdat.Nsamples[self.mode])
-        self.yy_indices_rnd = np.empty(self.globdat.Nsamples[self.mode])
-        self.zz_indices_rnd = np.empty(self.globdat.Nsamples[self.mode])
+        if ARGS.verbose :
+            print 'In InputData(%s) : generate_rnd_indices'%self.mode
+        self.xx_indices_rnd = np.empty(self.globdat.Nsamples[self.mode], dtype=int)
+        self.yy_indices_rnd = np.empty(self.globdat.Nsamples[self.mode], dtype=int)
+        self.zz_indices_rnd = np.empty(self.globdat.Nsamples[self.mode], dtype=int)
         for ii in xrange(self.globdat.Nsamples[self.mode]) :
             self.xx_indices_rnd[ii], self.yy_indices_rnd[ii], self.zz_indices_rnd[ii] = self.position_selectors[0]()
     #}}}
@@ -477,6 +481,9 @@ class InputData(Dataset) :#{{{
             )
     #}}}
     def getitem_deterministic(self, xx, yy, zz, __ID) :#{{{
+        assert isinstance(xx, int)
+        assert isinstance(yy, int)
+        assert isinstance(zz, int)
         assert xx <= self.xlength
         assert yy <= self.ylength
         assert zz <= self.zlength
@@ -991,7 +998,7 @@ if __name__ == '__main__' :
         if ARGS.verbose :
             print 'Putting network in parallel mode.'
         globdat.net = nn.DataParallel(globdat.net)
-        if not ARGS.ignore_existing :
+        if not ARGS.ignoreexisting :
             globdat.load_network('trained_network_%s.pt'%ARGS.output)
 
         globdat.net.to(DEVICE)
@@ -1003,6 +1010,12 @@ if __name__ == '__main__' :
         loss_function = globdat.loss_function()
         optimizer = globdat.optimizer()
         lr_scheduler = globdat.lr_scheduler(optimizer)
+
+        # TODO
+        xx_val = []
+        yy_val = []
+        zz_val = []
+        # END TODO
 
         with InputData(globdat, 'training') as training_set :
             training_loader = globdat.data_loader(training_set)
@@ -1018,6 +1031,12 @@ if __name__ == '__main__' :
                     # loop over one epoch
                     globdat.net.train()
                     for t, data in enumerate(training_loader) :
+                        
+                        # TODO
+                        xx_val.extend(list(data[-1].cpu().numpy()[:,0]))
+                        yy_val.extend(list(data[-1].cpu().numpy()[:,1]))
+                        zz_val.extend(list(data[-1].cpu().numpy()[:,2]))
+                        # END TODO
 
                         optimizer.zero_grad()
                         loss = loss_function(
@@ -1038,6 +1057,15 @@ if __name__ == '__main__' :
                             globdat.save_loss('loss_%s.npz'%ARGS.output)
                             globdat.save_network('trained_network_%s.pt'%ARGS.output)
                             sys.exit(0)
+
+                    # TODO
+                    np.savez(
+                        '/home/lthiele/DM_to_electrons/periodiciy_troubleshooting_%s.npz'%ARGS.output,
+                        xx = np.array(xx_val),
+                        yy = np.array(yy_val),
+                        zz = np.array(zz_val),
+                        )
+                    # END TODO
 
                     # evaluate on the validation set
                     globdat.net.eval()

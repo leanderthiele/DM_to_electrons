@@ -1017,75 +1017,77 @@ if __name__ == '__main__' :
         zz_val = []
         # END TODO
 
-        with InputData(globdat, 'training') as training_set :
+        with InputData(globdat, 'training') as training_set, InputData(globdat, 'validation') as validation_set :
+
             training_loader = globdat.data_loader(training_set)
 
-            with InputData(globdat, 'validation') as validation_set :
-                # keep the validation data always the same
-                # (reduces noise in the output and makes diagnostics easier)
-                validation_set.generate_rnd_indices()
-                validation_loader = globdat.data_loader(validation_set)
+            # keep the validation data always the same
+            # (reduces noise in the output and makes diagnostics easier)
+            validation_set.generate_rnd_indices()
+            validation_loader = globdat.data_loader(validation_set)
 
-                while True : # train until time is up
+            while True : # train until time is up
 
-                    # loop over one epoch
-                    globdat.net.train()
-                    for t, data in enumerate(training_loader) :
-                        
-                        # TODO
-                        xx_val.extend(list(data[-1].cpu().numpy()[:,0]))
-                        yy_val.extend(list(data[-1].cpu().numpy()[:,1]))
-                        zz_val.extend(list(data[-1].cpu().numpy()[:,2]))
-                        # END TODO
-
-                        optimizer.zero_grad()
-                        loss = loss_function(
-                            globdat.net(
-                                torch.autograd.Variable(data[0].to(DEVICE), requires_grad=False)
-                                ),
-                            torch.autograd.Variable(data[1].to(DEVICE), requires_grad=False)
-                            )
-                        
-                        if ARGS.verbose and not GPU_AVAIL :
-                            print '\ttraining loss : %.3e'%loss.item()
-
-                        globdat.update_training_loss(loss.item())
-                        loss.backward()
-                        optimizer.step()
-                        
-                        if globdat.stop_training() :
-                            globdat.save_loss('loss_%s.npz'%ARGS.output)
-                            globdat.save_network('trained_network_%s.pt'%ARGS.output)
-                            sys.exit(0)
-
+                # loop over one epoch
+                globdat.net.train()
+                for t, data_train in enumerate(training_loader) :
+                    
                     # TODO
-                    np.savez(
-                        '/home/lthiele/DM_to_electrons/periodiciy_troubleshooting_%s.npz'%ARGS.output,
-                        xx = np.array(xx_val),
-                        yy = np.array(yy_val),
-                        zz = np.array(zz_val),
-                        )
+                    xx_val.extend(list(data_train[-1].cpu().numpy()[:,0]))
+                    yy_val.extend(list(data_train[-1].cpu().numpy()[:,1]))
+                    zz_val.extend(list(data_train[-1].cpu().numpy()[:,2]))
                     # END TODO
 
-                    # evaluate on the validation set
-                    globdat.net.eval()
-                    _loss = 0.0
-                    for t_val, data_val in enumerate(validation_loader) :
-                        with torch.no_grad() :
-                            _loss += loss_function(
-                                globdat.net(
-                                    torch.autograd.Variable(data[0], requires_grad=False).to(DEVICE)
-                                    ),
-                                torch.autograd.Variable(data[1], requires_grad=False).to(DEVICE)
-                                ).item()
+                    optimizer.zero_grad()
+                    loss = loss_function(
+                        globdat.net(
+                            torch.autograd.Variable(data_train[0].to(DEVICE), requires_grad=False)
+                            ),
+                        torch.autograd.Variable(data_train[1].to(DEVICE), requires_grad=False)
+                        )
+                    
+                    if ARGS.verbose and not GPU_AVAIL :
+                        print '\ttraining loss : %.3e'%loss.item()
 
-                    if ARGS.verbose :
-                        print 'validation loss : %.6e'%(_loss/(t_val+1.0))
-                    globdat.update_validation_loss(_loss/(t_val+1.0))
+                    globdat.update_training_loss(loss.item())
+                    loss.backward()
+                    optimizer.step()
+                    
+                    if globdat.stop_training() :
+                        globdat.save_loss('loss_%s.npz'%ARGS.output)
+                        globdat.save_network('trained_network_%s.pt'%ARGS.output)
+                        sys.exit(0)
+                # end loop over one epoch
 
-                    if lr_scheduler is not None :
-                        lr_scheduler.step(_loss)
+                # TODO
+                np.savez(
+                    '/home/lthiele/DM_to_electrons/periodiciy_troubleshooting_%s.npz'%ARGS.output,
+                    xx = np.array(xx_val),
+                    yy = np.array(yy_val),
+                    zz = np.array(zz_val),
+                    )
+                # END TODO
 
-                    globdat.save_loss('loss_%s.npz'%ARGS.output)
-                    globdat.save_network('trained_network_%s.pt'%ARGS.output)
+                # evaluate on the validation set
+                globdat.net.eval()
+                _loss = 0.0
+                for t_val, data_val in enumerate(validation_loader) :
+                    with torch.no_grad() :
+                        _loss += loss_function(
+                            globdat.net(
+                                torch.autograd.Variable(data_val[0], requires_grad=False).to(DEVICE)
+                                ),
+                            torch.autograd.Variable(data_val[1], requires_grad=False).to(DEVICE)
+                            ).item()
+                # end evaluate on validation set
+
+                if ARGS.verbose :
+                    print 'validation loss : %.6e'%(_loss/(t_val+1.0))
+                globdat.update_validation_loss(_loss/(t_val+1.0))
+
+                if lr_scheduler is not None :
+                    lr_scheduler.step(_loss)
+
+                globdat.save_loss('loss_%s.npz'%ARGS.output)
+                globdat.save_network('trained_network_%s.pt'%ARGS.output)
     #}}}

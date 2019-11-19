@@ -33,6 +33,8 @@ fix rescaling (make member fct of InputData?)
 !!! LOSS SEEMS PERIODIC -- WHAT'S GOING ON???
 """
 
+MAX_SEED = 2**32
+
 class _ArgParser(object) :#{{{
     def __init__(self) :#{{{
         _modes    = ['train', 'valid', ]
@@ -344,7 +346,7 @@ class PositionSelector(object) :#{{{
         self.zlength = self.globdat.block_shapes[self.mode][2] - self.globdat.DM_sidelength
 
         self.empty_fraction = kwargs['empty_fraction'] if 'empty_fraction' in kwargs else 1.0
-        self.rnd_generator = np.random.RandomState(int(1e6*clock()) + seed)
+        self.rnd_generator = np.random.RandomState((hash(str(clock()+seed))+hash(self.mode))%MAX_SEED)
         assert 0.0 <= self.empty_fraction <= 1.0
         if self.empty_fraction < 1.0 :
             if ARGS.verbose :
@@ -418,7 +420,7 @@ class InputData(Dataset) :#{{{
             self.position_selectors.append(PositionSelector(
                 self.globdat, self.mode, ii, **self.globdat.sample_selector_kw
                 ))
-            self.rnd_generators.append(np.random.RandomState(int(1e6*clock())+ii))
+            self.rnd_generators.append(np.random.RandomState((hash(str(clock()+ii))+hash(self.mode))%MAX_SEED))
 
         # sanity check
         assert self.stepper is None if self.position_selectors[0].is_biased() else True
@@ -523,7 +525,7 @@ class InputData(Dataset) :#{{{
         return (
             torch.from_numpy(DM.copy()).unsqueeze(0),
             torch.from_numpy(gas.copy()).unsqueeze(0),
-            torch.from_numpy(np.array([__xx, __yy, __zz])),
+            torch.from_numpy(np.array([__xx, __yy, __zz], dtype=int)),
             )
         # add fake dimension (channel dimension is 0 here)
         """
@@ -1017,9 +1019,12 @@ if __name__ == '__main__' :
         zz_val = []
         # END TODO
 
-        with InputData(globdat, 'training') as training_set, InputData(globdat, 'validation') as validation_set :
+# TODO
+#        with InputData(globdat, 'training') as training_set, InputData(globdat, 'validation') as validation_set :
+        with InputData(globdat, 'validation') as validation_set :
 
-            training_loader = globdat.data_loader(training_set)
+# TODO
+#            training_loader = globdat.data_loader(training_set)
 
             # keep the validation data always the same
             # (reduces noise in the output and makes diagnostics easier)
@@ -1030,64 +1035,70 @@ if __name__ == '__main__' :
 
                 # loop over one epoch
                 globdat.net.train()
-                for t, data_train in enumerate(training_loader) :
-                    
-                    # TODO
-                    xx_val.extend(list(data_train[-1].cpu().numpy()[:,0]))
-                    yy_val.extend(list(data_train[-1].cpu().numpy()[:,1]))
-                    zz_val.extend(list(data_train[-1].cpu().numpy()[:,2]))
-                    # END TODO
-
-                    optimizer.zero_grad()
-                    loss = loss_function(
-                        globdat.net(
-                            torch.autograd.Variable(data_train[0].to(DEVICE), requires_grad=False)
-                            ),
-                        torch.autograd.Variable(data_train[1].to(DEVICE), requires_grad=False)
-                        )
-                    
-                    if ARGS.verbose and not GPU_AVAIL :
-                        print '\ttraining loss : %.3e'%loss.item()
-
-                    globdat.update_training_loss(loss.item())
-                    loss.backward()
-                    optimizer.step()
-                    
-                    if globdat.stop_training() :
-                        globdat.save_loss('loss_%s.npz'%ARGS.output)
-                        globdat.save_network('trained_network_%s.pt'%ARGS.output)
-                        sys.exit(0)
-                # end loop over one epoch
 
                 # TODO
-                np.savez(
-                    '/home/lthiele/DM_to_electrons/periodiciy_troubleshooting_%s.npz'%ARGS.output,
-                    xx = np.array(xx_val),
-                    yy = np.array(yy_val),
-                    zz = np.array(zz_val),
-                    )
+                with InputData(globdat, 'training') as training_set :
+                    training_loader = globdat.data_loader(training_set)
                 # END TODO
 
-                # evaluate on the validation set
-                globdat.net.eval()
-                _loss = 0.0
-                for t_val, data_val in enumerate(validation_loader) :
-                    with torch.no_grad() :
-                        _loss += loss_function(
+                    for t, data_train in enumerate(training_loader) :
+                        
+                        # TODO
+                        xx_val.extend(list(data_train[-1].cpu().numpy()[:,0]))
+                        yy_val.extend(list(data_train[-1].cpu().numpy()[:,1]))
+                        zz_val.extend(list(data_train[-1].cpu().numpy()[:,2]))
+                        # END TODO
+
+                        optimizer.zero_grad()
+                        loss = loss_function(
                             globdat.net(
-                                torch.autograd.Variable(data_val[0], requires_grad=False).to(DEVICE)
+                                torch.autograd.Variable(data_train[0].to(DEVICE), requires_grad=False)
                                 ),
-                            torch.autograd.Variable(data_val[1], requires_grad=False).to(DEVICE)
-                            ).item()
-                # end evaluate on validation set
+                            torch.autograd.Variable(data_train[1].to(DEVICE), requires_grad=False)
+                            )
+                        
+                        if ARGS.verbose and not GPU_AVAIL :
+                            print '\ttraining loss : %.3e'%loss.item()
 
-                if ARGS.verbose :
-                    print 'validation loss : %.6e'%(_loss/(t_val+1.0))
-                globdat.update_validation_loss(_loss/(t_val+1.0))
+                        globdat.update_training_loss(loss.item())
+                        loss.backward()
+                        optimizer.step()
+                        
+                        if globdat.stop_training() :
+                            globdat.save_loss('loss_%s.npz'%ARGS.output)
+                            globdat.save_network('trained_network_%s.pt'%ARGS.output)
+                            sys.exit(0)
+                    # end loop over one epoch
 
-                if lr_scheduler is not None :
-                    lr_scheduler.step(_loss)
+                    # TODO
+                    np.savez(
+                        '/home/lthiele/DM_to_electrons/periodicity_troubleshooting_%s.npz'%ARGS.output,
+                        xx = np.array(xx_val),
+                        yy = np.array(yy_val),
+                        zz = np.array(zz_val),
+                        )
+                    # END TODO
 
-                globdat.save_loss('loss_%s.npz'%ARGS.output)
-                globdat.save_network('trained_network_%s.pt'%ARGS.output)
+                    # evaluate on the validation set
+                    globdat.net.eval()
+                    _loss = 0.0
+                    for t_val, data_val in enumerate(validation_loader) :
+                        with torch.no_grad() :
+                            _loss += loss_function(
+                                globdat.net(
+                                    torch.autograd.Variable(data_val[0], requires_grad=False).to(DEVICE)
+                                    ),
+                                torch.autograd.Variable(data_val[1], requires_grad=False).to(DEVICE)
+                                ).item()
+                    # end evaluate on validation set
+
+                    if ARGS.verbose :
+                        print 'validation loss : %.6e'%(_loss/(t_val+1.0))
+                    globdat.update_validation_loss(_loss/(t_val+1.0))
+
+                    if lr_scheduler is not None :
+                        lr_scheduler.step(_loss)
+
+                    globdat.save_loss('loss_%s.npz'%ARGS.output)
+                    globdat.save_network('trained_network_%s.pt'%ARGS.output)
     #}}}

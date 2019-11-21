@@ -31,6 +31,13 @@ e.g.    -- size of input (DM, gas, box size) [raise RuntimeError]
 fix rescaling (make member fct of InputData?)
 
 !!! LOSS SEEMS PERIODIC -- WHAT'S GOING ON???
+
+clean the model feed
+
+input normalization w/ bias ???
+
+maybe want to learn on log and do biasing in loss function?
+    --> would keep weights of comparable size
 """
 
 MAX_SEED = 2**32
@@ -38,7 +45,7 @@ MAX_SEED = 2**32
 class _ArgParser(object) :#{{{
     def __init__(self) :#{{{
         _modes    = ['train', 'valid', ]
-        _scalings = ['log', 'linear', 'sqrt', 'cbrt', 'scaled', ]
+        _scalings = ['log', 'linear', 'sqrt', 'cbrt', 'scaled', 'linear_filtered', 'linear_filtered_wbatt' ]
 
         self.__parser = argparse.ArgumentParser(
             description='Code to train on DM only sims and hydro sims to \
@@ -200,6 +207,9 @@ class GlobalData(object) :#{{{
         # sample selector
         self.sample_selector_kw = configs[0]['sample_selector_kw']
 
+        # pretraining
+        self.__pretraining_epochs = configs[0]['pretraining_epochs']
+
         # where to find and put data files
         self.__input_path  = configs[0]['input_path']
         self.__output_path = configs[0]['output_path']
@@ -227,6 +237,8 @@ class GlobalData(object) :#{{{
 
         # needs to be updated from the main code
         self.net = None
+
+        self.__epoch = 1
     #}}}
     def loss_function(self) :#{{{
         return self.__loss_function()
@@ -269,6 +281,16 @@ class GlobalData(object) :#{{{
             validation_loss = self.validation_loss,
             )
     #}}}
+    def next_epoch(self) :#{{{
+        self.__epoch += 1
+        # perhaps some other code if desired
+    #}}}
+    def pretraining(self) :#{{{
+        return self.__epoch <= self.__pretraining_epochs
+    #}}}
+    def target_as_model(self) :#{{{
+        return self.__epoch <= self.__pretraining_epochs/2
+    #}}}
     def stop_training(self) :#{{{
         return (time()-START_TIME)/60./60. > ARGS.time
     #}}}
@@ -288,22 +310,21 @@ class GlobalData(object) :#{{{
 #}}}
 
 class Stepper(object) :#{{{
-    def __init__(self, globdat, mode) :#{{{
-        self.globdat = globdat
+    def __init__(self, mode) :#{{{
         self.mode = mode
-        self.xlength = self.globdat.block_shapes[mode][0] - self.globdat.DM_sidelength
-        self.ylength = self.globdat.block_shapes[mode][1] - self.globdat.DM_sidelength
-        self.zlength = self.globdat.block_shapes[mode][2] - self.globdat.DM_sidelength
+        self.xlength = GLOBDAT.block_shapes[mode][0] - GLOBDAT.DM_sidelength
+        self.ylength = GLOBDAT.block_shapes[mode][1] - GLOBDAT.DM_sidelength
+        self.zlength = GLOBDAT.block_shapes[mode][2] - GLOBDAT.DM_sidelength
 
         self.max_x_index = self.__max_index(self.xlength)
         self.max_y_index = self.__max_index(self.ylength)
         self.max_z_index = self.__max_index(self.zlength)
     #}}}
     def __max_index(self, total_length) :#{{{
-        if total_length%self.globdat.gas_sidelength == 0 : # gas sidelength fits perfectly
-            return total_length/self.globdat.gas_sidelength # CORRECT
+        if total_length%GLOBDAT.gas_sidelength == 0 : # gas sidelength fits perfectly
+            return total_length/GLOBDAT.gas_sidelength # CORRECT
         else : # need some patching at the end
-            return total_length/self.globdat.gas_sidelength + 1 # CORRECT
+            return total_length/GLOBDAT.gas_sidelength + 1 # CORRECT
     #}}}
     def __getitem__(self, index) :#{{{
         __xx = index%(self.max_x_index+1)
@@ -311,19 +332,19 @@ class Stepper(object) :#{{{
         __zz = index/((self.max_x_index+1)*(self.max_y_index+1))
 
         if __xx < self.max_x_index :
-            __xx *= self.globdat.gas_sidelength
+            __xx *= GLOBDAT.gas_sidelength
         elif __xx == self.max_x_index :
             __xx = self.xlength
         else :
             raise RuntimeError('I should not be here.')
         if __yy < self.max_y_index :
-            __yy *= self.globdat.gas_sidelength
+            __yy *= GLOBDAT.gas_sidelength
         elif __yy == self.max_y_index :
             __yy = self.ylength
         else :
             raise RuntimeError('I should not be here.')
         if __zz < self.max_z_index :
-            __zz *= self.globdat.gas_sidelength
+            __zz *= GLOBDAT.gas_sidelength
         elif __zz == self.max_z_index :
             __zz = self.zlength
         else :
@@ -337,13 +358,12 @@ class Stepper(object) :#{{{
 #}}}
 
 class PositionSelector(object) :#{{{
-    def __init__(self, globdat, mode, seed = 0, **kwargs) :#{{{
-        self.globdat = globdat
+    def __init__(self, mode, seed = 0, **kwargs) :#{{{
         self.mode = mode
 
-        self.xlength = self.globdat.block_shapes[self.mode][0] - self.globdat.DM_sidelength
-        self.ylength = self.globdat.block_shapes[self.mode][1] - self.globdat.DM_sidelength
-        self.zlength = self.globdat.block_shapes[self.mode][2] - self.globdat.DM_sidelength
+        self.xlength = GLOBDAT.block_shapes[self.mode][0] - GLOBDAT.DM_sidelength
+        self.ylength = GLOBDAT.block_shapes[self.mode][1] - GLOBDAT.DM_sidelength
+        self.zlength = GLOBDAT.block_shapes[self.mode][2] - GLOBDAT.DM_sidelength
 
         self.empty_fraction = kwargs['empty_fraction'] if 'empty_fraction' in kwargs else 1.0
         self.rnd_generator = np.random.RandomState((hash(str(clock()+seed))+hash(self.mode))%MAX_SEED)
@@ -357,10 +377,10 @@ class PositionSelector(object) :#{{{
             assert self.pos.shape[0] == self.log_mass.shape[0]
             assert self.pos.shape[1] == 3
             # cnvert to pixel coordinates
-            self.pos = (self.pos*float(self.globdat.box_sidelength)/(1e3*self.globdat.box_size)).astype(int)
-            assert np.max(self.pos[:,0]) < self.globdat.block_shapes[self.mode][0], '%d > %d'%(np.max(self.pos[:,0]),self.globdat.block_shapes[self.mode][0])
-            assert np.max(self.pos[:,1]) < self.globdat.block_shapes[self.mode][1], '%d > %d'%(np.max(self.pos[:,1]),self.globdat.block_shapes[self.mode][1])
-            assert np.max(self.pos[:,2]) < self.globdat.block_shapes[self.mode][2], '%d > %d'%(np.max(self.pos[:,2]),self.globdat.block_shapes[self.mode][2])
+            self.pos = (self.pos*float(GLOBDAT.box_sidelength)/(1e3*GLOBDAT.box_size)).astype(int)
+            assert np.max(self.pos[:,0]) < GLOBDAT.block_shapes[self.mode][0], '%d > %d'%(np.max(self.pos[:,0]),GLOBDAT.block_shapes[self.mode][0])
+            assert np.max(self.pos[:,1]) < GLOBDAT.block_shapes[self.mode][1], '%d > %d'%(np.max(self.pos[:,1]),GLOBDAT.block_shapes[self.mode][1])
+            assert np.max(self.pos[:,2]) < GLOBDAT.block_shapes[self.mode][2], '%d > %d'%(np.max(self.pos[:,2]),GLOBDAT.block_shapes[self.mode][2])
 
             # sort according to mass
             __sorting_indices = np.argsort(self.log_mass)
@@ -385,7 +405,7 @@ class PositionSelector(object) :#{{{
         else :
             __rnd_halo_index = self.rnd_generator.choice(len(self.log_mass), p = self.weights)
             # displacements of halo center from center of the box
-            __rnd_displacements = self.rnd_generator.randint(0, high = self.globdat.DM_sidelength, size = 3)
+            __rnd_displacements = self.rnd_generator.randint(0, high = GLOBDAT.DM_sidelength, size = 3)
             xx_rnd = np.minimum(self.xlength, np.maximum(0, self.pos[__rnd_halo_index, 0] - __rnd_displacements[0]))
             yy_rnd = np.minimum(self.ylength, np.maximum(0, self.pos[__rnd_halo_index, 1] - __rnd_displacements[1]))
             zz_rnd = np.minimum(self.zlength, np.maximum(0, self.pos[__rnd_halo_index, 2] - __rnd_displacements[2]))
@@ -394,33 +414,41 @@ class PositionSelector(object) :#{{{
 #}}}
 
 class InputData(Dataset) :#{{{
-    def __init__(self, globdat, mode, stepper = None) :#{{{
-        """
-        mode = 'training' , 'validation' , 'testing'
-        """
-        self.globdat = globdat
+    def __init__(self, mode, stepper = None) :#{{{
+        __modes = ['training', 'validation', 'testing', ]
+        __types = ['DM', 'gas', 'gas_model', ]
+
         self.mode = mode
+        assert self.mode in __modes
         self.stepper = stepper
 
         self.do_random_transformations = True if self.stepper is None else False
 
-        self.xlength = self.globdat.block_shapes[mode][0] - self.globdat.DM_sidelength
-        self.ylength = self.globdat.block_shapes[mode][1] - self.globdat.DM_sidelength
-        self.zlength = self.globdat.block_shapes[mode][2] - self.globdat.DM_sidelength
+        self.xlength = GLOBDAT.block_shapes[mode][0] - GLOBDAT.DM_sidelength
+        self.ylength = GLOBDAT.block_shapes[mode][1] - GLOBDAT.DM_sidelength
+        self.zlength = GLOBDAT.block_shapes[mode][2] - GLOBDAT.DM_sidelength
 
         self.files = []
-        self.DM_datasets = []
-        self.gas_datasets = []
+        self.datasets = {}
+        for t in __types :
+            self.datasets[t] = []
         self.position_selectors = []
         self.rnd_generators = []
-        for ii in xrange(max(self.globdat.num_workers, 1)) :
-            self.files.append(h5py.File(self.globdat.data_path, 'r', driver='mpio', comm=MPI.COMM_WORLD))
-            self.DM_datasets.append(self.files[-1]['DM/'+self.mode])
-            self.gas_datasets.append(self.files[-1]['gas/'+self.mode])
+        for ii in xrange(max(GLOBDAT.num_workers, 1)) :
+            self.files.append(h5py.File(GLOBDAT.data_path, 'r', driver='mpio', comm=MPI.COMM_WORLD))
+            for t in __types :
+                self.datasets[t].append(self.files[-1]['%s/%s'%(t, self.mode)])
             self.position_selectors.append(PositionSelector(
-                self.globdat, self.mode, ii, **self.globdat.sample_selector_kw
+                self.mode, ii, **GLOBDAT.sample_selector_kw
                 ))
             self.rnd_generators.append(np.random.RandomState((hash(str(clock()+ii))+hash(self.mode))%MAX_SEED))
+
+        # read the backward transformations
+        self.get_back = {}
+        for t in __types :
+            self.get_back[t] = eval(compile(self.files[0]['%s/get_back'%t].attrs['function'], '<string>', 'eval'))
+            # test the transformation
+            assert np.fabs(self.get_back[t](self.files[0]['%s/get_back'%t].attrs['test_in'])/self.files[0]['%s/get_back'%t].attrs['test_out'] - 1.0) < 1e-3, t
 
         # sanity check
         assert self.stepper is None if self.position_selectors[0].is_biased() else True
@@ -439,41 +467,49 @@ class InputData(Dataset) :#{{{
     def generate_rnd_indices(self) :#{{{
         if ARGS.verbose :
             print 'In InputData(%s) : generate_rnd_indices'%self.mode
-        self.xx_indices_rnd = np.empty(self.globdat.Nsamples[self.mode], dtype=int)
-        self.yy_indices_rnd = np.empty(self.globdat.Nsamples[self.mode], dtype=int)
-        self.zz_indices_rnd = np.empty(self.globdat.Nsamples[self.mode], dtype=int)
-        for ii in xrange(self.globdat.Nsamples[self.mode]) :
+        self.xx_indices_rnd = np.empty(GLOBDAT.Nsamples[self.mode], dtype=int)
+        self.yy_indices_rnd = np.empty(GLOBDAT.Nsamples[self.mode], dtype=int)
+        self.zz_indices_rnd = np.empty(GLOBDAT.Nsamples[self.mode], dtype=int)
+        for ii in xrange(GLOBDAT.Nsamples[self.mode]) :
             self.xx_indices_rnd[ii], self.yy_indices_rnd[ii], self.zz_indices_rnd[ii] = self.position_selectors[0]()
     #}}}
-    def __randomly_transform(self, arr1, arr2, __ID) :#{{{
+    def __randomly_transform(self, arr1, arr2, arr3, __ID) :#{{{
         # reflections
         if self.rnd_generators[__ID].rand() < 0.5 :
             arr1 = arr1[::-1,:,:]
-            arr1 = arr1[::-1,:,:]
+            arr2 = arr2[::-1,:,:]
+            arr3 = arr3[::-1,:,:]
         if self.rnd_generators[__ID].rand() < 0.5 :
             arr1 = arr1[:,::-1,:]
             arr2 = arr2[:,::-1,:]
+            arr3 = arr3[:,::-1,:]
         if self.rnd_generators[__ID].rand() < 0.5 :
             arr1 = arr1[:,::-1]
             arr2 = arr2[:,::-1]
+            arr3 = arr3[:,::-1]
         # transpositions
         prand = self.rnd_generators[__ID].rand()
         if prand < 1./6. :
             arr1 = np.transpose(arr1, axes=(0,2,1))
             arr2 = np.transpose(arr2, axes=(0,2,1))
+            arr3 = np.transpose(arr3, axes=(0,2,1))
         elif prand < 2./6. :
             arr1 = np.transpose(arr1, axes=(2,1,0))
             arr2 = np.transpose(arr2, axes=(2,1,0))
+            arr3 = np.transpose(arr3, axes=(2,1,0))
         elif prand < 3./6. :
             arr1 = np.transpose(arr1, axes=(1,0,2))
             arr2 = np.transpose(arr2, axes=(1,0,2))
+            arr3 = np.transpose(arr3, axes=(1,0,2))
         elif prand < 4./6. :
             arr1 = np.transpose(arr1, axes=(2,0,1))
             arr2 = np.transpose(arr2, axes=(2,0,1))
+            arr3 = np.transpose(arr3, axes=(2,0,1))
         elif prand < 5./6. :
             arr1 = np.transpose(arr1, axes=(1,2,0))
             arr2 = np.transpose(arr2, axes=(1,2,0))
-        return arr1, arr2
+            arr3 = np.transpose(arr3, axes=(1,2,0))
+        return arr1, arr2, arr3
     #}}}
     def __index_3D(self, index) :#{{{
         return (
@@ -489,20 +525,25 @@ class InputData(Dataset) :#{{{
         assert xx <= self.xlength
         assert yy <= self.ylength
         assert zz <= self.zlength
-        DM = self.DM_datasets[__ID][
-            xx : xx+self.globdat.DM_sidelength,
-            yy : yy+self.globdat.DM_sidelength,
-            zz : zz+self.globdat.DM_sidelength
+        DM = self.datasets['DM'][__ID][
+            xx : xx+GLOBDAT.DM_sidelength,
+            yy : yy+GLOBDAT.DM_sidelength,
+            zz : zz+GLOBDAT.DM_sidelength
             ]
-        gas = self.gas_datasets[__ID][
-            xx+(self.globdat.DM_sidelength-self.globdat.gas_sidelength)/2 : xx+(self.globdat.DM_sidelength+self.globdat.gas_sidelength)/2,
-            yy+(self.globdat.DM_sidelength-self.globdat.gas_sidelength)/2 : yy+(self.globdat.DM_sidelength+self.globdat.gas_sidelength)/2,
-            zz+(self.globdat.DM_sidelength-self.globdat.gas_sidelength)/2 : zz+(self.globdat.DM_sidelength+self.globdat.gas_sidelength)/2,
+        gas = self.datasets['gas'][__ID][
+            xx+(GLOBDAT.DM_sidelength-GLOBDAT.gas_sidelength)/2 : xx+(GLOBDAT.DM_sidelength+GLOBDAT.gas_sidelength)/2,
+            yy+(GLOBDAT.DM_sidelength-GLOBDAT.gas_sidelength)/2 : yy+(GLOBDAT.DM_sidelength+GLOBDAT.gas_sidelength)/2,
+            zz+(GLOBDAT.DM_sidelength-GLOBDAT.gas_sidelength)/2 : zz+(GLOBDAT.DM_sidelength+GLOBDAT.gas_sidelength)/2,
             ]
-        return DM, gas
+        gas_model = self.datasets['gas_model'][__ID][
+            xx+(GLOBDAT.DM_sidelength-GLOBDAT.gas_sidelength)/2 : xx+(GLOBDAT.DM_sidelength+GLOBDAT.gas_sidelength)/2,
+            yy+(GLOBDAT.DM_sidelength-GLOBDAT.gas_sidelength)/2 : yy+(GLOBDAT.DM_sidelength+GLOBDAT.gas_sidelength)/2,
+            zz+(GLOBDAT.DM_sidelength-GLOBDAT.gas_sidelength)/2 : zz+(GLOBDAT.DM_sidelength+GLOBDAT.gas_sidelength)/2,
+            ]
+        return DM, gas, gas_model
     #}}}
     def __getitem__(self, index) :#{{{
-        __ID = get_worker_info().id if self.globdat.num_workers > 0 else 0
+        __ID = get_worker_info().id if GLOBDAT.num_workers > 0 else 0
         if self.stepper is not None :
             assert ARGS.mode != 'train', 'It does not make sense to have a stepper in training mode.'
             assert self.mode != 'training', 'It does not make sense to have a stepper in training mode.'
@@ -513,20 +554,32 @@ class InputData(Dataset) :#{{{
             assert self.mode != 'training', 'This will produce always the same samples, not recommended in training mode.'
             __xx, __yy, __zz = self.xx_indices_rnd[index], self.yy_indices_rnd[index], self.zz_indices_rnd[index]
 
-        DM, gas = self.getitem_deterministic(
+        DM, gas, gas_model = self.getitem_deterministic(
             __xx, __yy, __zz,
             __ID
             )
         if self.do_random_transformations :
-            DM, gas = self.__randomly_transform(DM, gas, __ID)
-        assert DM.shape[0]  == DM.shape[1]  == DM.shape[2]  == self.globdat.DM_sidelength,  DM.shape
-        assert gas.shape[0] == gas.shape[1] == gas.shape[2] == self.globdat.gas_sidelength, gas.shape
+            DM, gas, gas_model = self.__randomly_transform(DM, gas, gas_model, __ID)
+        assert DM.shape[0]  == DM.shape[1]  == DM.shape[2]  == GLOBDAT.DM_sidelength,  DM.shape
+        assert gas.shape[0] == gas.shape[1] == gas.shape[2] == GLOBDAT.gas_sidelength, gas.shape
+        assert gas_model.shape[0] == gas_model.shape[1] == gas_model.shape[2] == GLOBDAT.gas_sidelength, gas_model.shape
 
-        return (
-            torch.from_numpy(DM.copy()).unsqueeze(0),
-            torch.from_numpy(gas.copy()).unsqueeze(0),
-            torch.from_numpy(np.array([__xx, __yy, __zz], dtype=int)),
-            )
+        # TODO implement custom target transformation
+        # TODO why do we need to .copy() again?
+        if GLOBDAT.target_as_model() :
+            return (
+                torch.from_numpy(DM.copy()).unsqueeze(0),
+                torch.from_numpy(np.log(gas.copy())).unsqueeze(0),
+                torch.from_numpy(np.log(gas.copy())).unsqueeze(0),
+                torch.from_numpy(np.array([__xx, __yy, __zz], dtype=int)),
+                )
+        else :
+            return (
+                torch.from_numpy(DM.copy()).unsqueeze(0),
+                torch.from_numpy(np.log(gas.copy())).unsqueeze(0),
+                torch.from_numpy(np.log(gas_model.copy())).unsqueeze(0),
+                torch.from_numpy(np.array([__xx, __yy, __zz], dtype=int)),
+                )
         # add fake dimension (channel dimension is 0 here)
         """
         return (
@@ -538,7 +591,7 @@ class InputData(Dataset) :#{{{
     #}}}
     def __len__(self) :#{{{
         if self.stepper is None :
-            return self.globdat.Nsamples[self.mode]
+            return GLOBDAT.Nsamples[self.mode]
         else :
             return len(self.stepper)
     #}}}
@@ -585,9 +638,11 @@ class BasicLayer(nn.Module) :#{{{
         }
     #}}}
     @staticmethod
-    def __crop_tensor(x) :#{{{
-        x = x.narrow(2,0,x.shape[2]-1).narrow(3,0,x.shape[3]-1).narrow(4,0,x.shape[4]-1).contiguous()
-        return x
+    def __crop_tensor(x, w) :#{{{
+        x = x.narrow(2,w/2,x.shape[2]-w)
+        x = x.narrow(3,w/2,x.shape[3]-w)
+        x = x.narrow(4,w/2,x.shape[4]-w)
+        return x.contiguous()
     #}}}
     def __init__(self, layer_dict) :#{{{
         super(BasicLayer, self).__init__()
@@ -605,7 +660,7 @@ class BasicLayer(nn.Module) :#{{{
             self.__conv_fct = Identity()
 
         if self.__merged_dict['crop_output'] :
-            self.__crop_fct = BasicLayer.__crop_tensor
+            self.__crop_fct = lambda x : BasicLayer.__crop_tensor(x, self.__merged_dict['crop_output'])
         else :
             self.__crop_fct = Identity()
 
@@ -655,6 +710,8 @@ class Network(nn.Module) :#{{{
                 self.network_dict['Level_%d'%(self.network_dict['NLevels']-1)]['through']
                 )
             )
+
+        self.is_frozen = False
     #}}}
     @staticmethod
     def __feed_forward_block(input_list) :#{{{
@@ -663,32 +720,73 @@ class Network(nn.Module) :#{{{
             layers.append(BasicLayer(layer_dict))
         return nn.Sequential(*layers)
     #}}}
-    def forward(self, x) :#{{{
-        intermediate_data = []
+    def __freeze(self) :#{{{
+        for ii in xrange(2*self.network_dict['NLevels'] - 1) :
+            if ii == 1 : # this is the last block
+                continue
+            for p in self.__blocks[ii].parameters() :
+                p.requires_grad = False
+    #}}}
+    def __thaw(self) :#{{{
+        for ii in xrange(2*self.network_dict['NLevels'] - 1) :
+            if ii == 1 : # this is the last block
+                continue
+            for p in self.__blocks[ii].parameters() :
+                p.requires_grad = True
+    #}}}
+    def __update_mode(self) :#{{{
+        if GLOBDAT.pretraining() and not self.is_frozen :
+            self.__freeze()
+            self.is_frozen = True
+            if ARGS.verbose :
+                print 'Network frozen (apart from last block).'
+        elif not GLOBDAT.pretraining() and self.is_frozen :
+            self.__thaw()
+            self.is_frozen = False
+            if ARGS.verbose :
+                print 'Network thawed.'
+    #}}}
+    def forward(self, x, xmodel) :#{{{
+# TODO
+#        self.__update_mode()
+        if not GLOBDAT.pretraining() :
+            intermediate_data = []
 
-        # contracting path
-        for ii in xrange(self.network_dict['NLevels']-1) :
-            x = self.__blocks[2*ii](x)
-            if self.network_dict['Level_%d'%ii]['concat'] :
-                intermediate_data.append(x.clone())
-            else :
-                intermediate_data.append(None)
+            # contracting path
+            for ii in xrange(self.network_dict['NLevels']-1) :
+                x = self.__blocks[2*ii](x)
+                if self.network_dict['Level_%d'%ii]['concat'] :
+                    intermediate_data.append(x.clone())
+                else :
+                    intermediate_data.append(None)
 
-        # bottom level
-        x = self.__blocks[2*(self.network_dict['NLevels']-1)](x)
+            # bottom level
+            x = self.__blocks[2*(self.network_dict['NLevels']-1)](x)
 
-        # expanding path
-        for ii in xrange(self.network_dict['NLevels']-2, -1, -1) :
-            if self.network_dict['Level_%d'%ii]['concat'] :
-                x = torch.cat((x, intermediate_data[ii]), dim = 1)
-            x = self.__blocks[2*ii+1](x)
+            # expanding path
+            for ii in xrange(self.network_dict['NLevels']-2, -1, -1) :
+                if self.network_dict['Level_%d'%ii]['concat'] :
+                    x = torch.cat((x, intermediate_data[ii]), dim = 1)
+                if ii == 0 and self.network_dict['feed_model'] :
+                    x = torch.cat((x, xmodel), dim = 1)
+                x = self.__blocks[2*ii+1](x)
+
+        else :
+            x = torch.cat(
+                (torch.zeros(
+                    xmodel.size()[0],
+                    self.network_dict['Level_1']['out'][-1]['outplane'],
+                    xmodel.size()[2], xmodel.size()[3], xmodel.size()[4]
+                    ).to(xmodel.device),
+                xmodel
+                ), dim = 1)
+            x = self.__blocks[2*0+1](x) # apply only the last block
         return x
     #}}}
 #}}}
 
 class Mesh(object) :#{{{
-    def __init__(self, globdat, arr) :#{{{
-        self.globdat = globdat
+    def __init__(self, arr) :#{{{
         self.arr = arr
         self.mesh = None
     #}}}
@@ -700,7 +798,7 @@ class Mesh(object) :#{{{
         else :
             self.mesh = ArrayMesh(
                 self.arr,
-                BoxSize=(self.globdat.box_size/float(self.globdat.box_sidelength))*np.array(self.arr.shape)
+                BoxSize=(GLOBDAT.box_size/float(GLOBDAT.box_sidelength))*np.array(self.arr.shape)
                 )
     #}}}
     def compute_powerspectrum(self) :#{{{
@@ -711,9 +809,8 @@ class Mesh(object) :#{{{
 #}}}
 
 class Analysis(object) :#{{{
-    def __init__(self, globdat, data) :#{{{
+    def __init__(self, data) :#{{{
         # data is instance of InputData
-        self.globdat = globdat
         self.data = data
 
         self.__rescalings = {
@@ -731,34 +828,34 @@ class Analysis(object) :#{{{
     #}}}
     def read_original(self) :#{{{
         self.original_field = self.__rescalings[ARGS.scaling](
-            self.data.gas_datasets[0][
-                (self.globdat.DM_sidelength-self.globdat.gas_sidelength)/2 : self.data.xlength+(self.globdat.DM_sidelength+self.globdat.gas_sidelength)/2,
-                (self.globdat.DM_sidelength-self.globdat.gas_sidelength)/2 : self.data.ylength+(self.globdat.DM_sidelength+self.globdat.gas_sidelength)/2,
-                (self.globdat.DM_sidelength-self.globdat.gas_sidelength)/2 : self.data.zlength+(self.globdat.DM_sidelength+self.globdat.gas_sidelength)/2,
+            self.data.datasets['gas'][0][
+                (GLOBDAT.DM_sidelength-GLOBDAT.gas_sidelength)/2 : self.data.xlength+(GLOBDAT.DM_sidelength+GLOBDAT.gas_sidelength)/2,
+                (GLOBDAT.DM_sidelength-GLOBDAT.gas_sidelength)/2 : self.data.ylength+(GLOBDAT.DM_sidelength+GLOBDAT.gas_sidelength)/2,
+                (GLOBDAT.DM_sidelength-GLOBDAT.gas_sidelength)/2 : self.data.zlength+(GLOBDAT.DM_sidelength+GLOBDAT.gas_sidelength)/2,
                 ]
             )
-        self.original_field_mesh  = Mesh(self.globdat, self.original_field)
+        self.original_field_mesh  = Mesh(self.original_field)
         self.original_field_mesh.read_mesh()
     #}}}
     def predict_whole_volume(self) :#{{{
         self.predicted_field = np.zeros(
-            (self.data.xlength+self.globdat.gas_sidelength, self.data.ylength+self.globdat.gas_sidelength, self.data.zlength+self.globdat.gas_sidelength),
+            (self.data.xlength+GLOBDAT.gas_sidelength, self.data.ylength+GLOBDAT.gas_sidelength, self.data.zlength+GLOBDAT.gas_sidelength),
             dtype = np.float32
             )
-        loader = globdat.data_loader(self.data)
+        loader = GLOBDAT.data_loader(self.data)
         for t, data in enumerate(loader) :
             with torch.no_grad() :
-                pred = globdat.net(
+                pred = GLOBDAT.net(
                     torch.autograd.Variable(data[0].to(DEVICE), requires_grad = False)
                     )[:,0,...].cpu().numpy()
             __coords = data[-1].numpy()
             for ii in xrange(pred.shape[0]) : # loop over batch dimension
                 self.predicted_field[
-                    __coords[ii,0] : __coords[ii,0] + self.globdat.gas_sidelength,
-                    __coords[ii,1] : __coords[ii,1] + self.globdat.gas_sidelength,
-                    __coords[ii,2] : __coords[ii,2] + self.globdat.gas_sidelength
+                    __coords[ii,0] : __coords[ii,0] + GLOBDAT.gas_sidelength,
+                    __coords[ii,1] : __coords[ii,1] + GLOBDAT.gas_sidelength,
+                    __coords[ii,2] : __coords[ii,2] + GLOBDAT.gas_sidelength
                     ] = self.__rescalings[ARGS.scaling](pred[ii,...])
-        self.predicted_field_mesh = Mesh(self.globdat, self.predicted_field)
+        self.predicted_field_mesh = Mesh(self.predicted_field)
         self.predicted_field_mesh.read_mesh()
     #}}}
     def compute_powerspectrum(self, mode) :#{{{
@@ -830,6 +927,7 @@ if __name__ == '__main__' :
     global CONFIGS
     global GPU_AVAIL
     global DEVICE
+    global GLOBDAT
 
     START_TIME = time()
     ARGS = _ArgParser()
@@ -856,22 +954,23 @@ if __name__ == '__main__' :
     # OUTPUT VALIDATION
     if ARGS.mode=='valid' :#{{{
 
-        globdat = GlobalData(*CONFIGS)
+        GLOBDAT = GlobalData(*CONFIGS)
 
-        try :
-            globdat.net = nn.DataParallel(Network(import_module(ARGS.network).this_network))
-            globdat.load_network('trained_network_%s.pt'%ARGS.output)
-        except RuntimeError :
-            globdat.net = Network(import_module(ARGS.network).this_network)
-            globdat.load_network('trained_network_%s.pt'%ARGS.output)
+# TODO
+#        try :
+        GLOBDAT.net = nn.DataParallel(Network(import_module(ARGS.network).this_network))
+        GLOBDAT.load_network('trained_network_%s.pt'%ARGS.output)
+#        except RuntimeError :
+#            GLOBDAT.net = Network(import_module(ARGS.network).this_network)
+#            GLOBDAT.load_network('trained_network_%s.pt'%ARGS.output)
 
-        globdat.net.to(DEVICE)
-        globdat.net.eval()
+        GLOBDAT.net.to(DEVICE)
+        GLOBDAT.net.eval()
             
         # VISUAL OUTPUT INSPECTION
         if True :#{{{
-            with InputData(globdat, 'validation') as validation_set :
-                validation_loader = globdat.data_loader(validation_set)
+            with InputData('validation') as validation_set :
+                validation_loader = GLOBDAT.data_loader(validation_set)
 
                 NPAGES = 4
                 for t, data in enumerate(validation_loader) :
@@ -880,16 +979,18 @@ if __name__ == '__main__' :
                     with torch.no_grad() :
                         targ = copy.deepcopy(data[1])
                         orig = copy.deepcopy(data[0])
-                        pred = globdat.net(
-                            torch.autograd.Variable(data[0], requires_grad=False)
+                        model = copy.deepcopy(data[2])
+                        pred = GLOBDAT.net(
+                            torch.autograd.Variable(data[0], requires_grad=False),
+                            torch.autograd.Variable(data[2], requires_grad=False),
                             )
                     
                     NPlots = 8
                     fig = plt.figure(figsize=(8.5, 11.0))
                     gs0 = gs.GridSpec(NPlots/2, 2, figure=fig, wspace = 0.2)
                     for ii in xrange(NPlots) :
-                        plane_gas = np.random.randint(0, high=globdat.gas_sidelength)
-                        plane_DM  = plane_gas + (globdat.DM_sidelength-globdat.gas_sidelength)/2
+                        plane_gas = np.random.randint(0, high=GLOBDAT.gas_sidelength)
+                        plane_DM  = plane_gas + (GLOBDAT.DM_sidelength-GLOBDAT.gas_sidelength)/2
 
                         gs00 = gs.GridSpecFromSubplotSpec(
                             2, 3, subplot_spec=gs0[ii%(NPlots/2), ii/(NPlots/2)],
@@ -907,7 +1008,7 @@ if __name__ == '__main__' :
                             vminmax = 3 # standard deviations
                             ax_orig.matshow(
                                 orig[ii,0,plane_DM,:,:].numpy(),
-                                extent=(0, globdat.DM_sidelength, 0, globdat.DM_sidelength),
+                                extent=(0, GLOBDAT.DM_sidelength, 0, GLOBDAT.DM_sidelength),
         #                        vmin = -vminmax, vmax = vminmax,
                                 )
                             ax_targ.matshow(
@@ -921,7 +1022,7 @@ if __name__ == '__main__' :
         #                elif ARGS.scaling=='linear' :
         #                    ax_orig.matshow(
         #                        np.log(np.sum(np.exp(orig[ii,0,:,:,:].numpy()), axis=0)),
-        #                        extent=(0, globdat.DM_sidelength, 0, globdat.DM_sidelength),
+        #                        extent=(0, GLOBDAT.DM_sidelength, 0, GLOBDAT.DM_sidelength),
         #                        )
         #                    ax_targ.matshow(
         #                        np.log(np.sum(targ[ii,0,:,:,:].numpy(), axis=0)),
@@ -932,10 +1033,10 @@ if __name__ == '__main__' :
 
                         rect = Rectangle(
                             (
-                                (globdat.DM_sidelength-globdat.gas_sidelength)/2,
-                                (globdat.DM_sidelength-globdat.gas_sidelength)/2,
+                                (GLOBDAT.DM_sidelength-GLOBDAT.gas_sidelength)/2,
+                                (GLOBDAT.DM_sidelength-GLOBDAT.gas_sidelength)/2,
                             ),
-                            width=globdat.gas_sidelength, height=globdat.gas_sidelength,
+                            width=GLOBDAT.gas_sidelength, height=GLOBDAT.gas_sidelength,
                             axes = ax_orig,
                             edgecolor = 'red',
                             fill = False,
@@ -961,10 +1062,10 @@ if __name__ == '__main__' :
 
         # SUMMARY STATISTICS
         if False :#{{{
-            stepper = Stepper(globdat, 'validation')
-            with InputData(globdat, 'validation', stepper) as validation_set :
+            stepper = Stepper('validation')
+            with InputData('validation', stepper) as validation_set :
 
-                a = Analysis(globdat, validation_set)
+                a = Analysis(validation_set)
 
                 a.read_original()
                 a.compute_powerspectrum('original')
@@ -993,66 +1094,61 @@ if __name__ == '__main__' :
     # TRAINING
     if ARGS.mode=='train' :#{{{
 
-        globdat = GlobalData(*CONFIGS)
+        GLOBDAT = GlobalData(*CONFIGS)
 
-        globdat.net = Network(import_module(ARGS.network).this_network)
+        GLOBDAT.net = Network(import_module(ARGS.network).this_network)
 
         if ARGS.verbose :
             print 'Putting network in parallel mode.'
-        globdat.net = nn.DataParallel(globdat.net)
+        GLOBDAT.net = nn.DataParallel(GLOBDAT.net)
         if not ARGS.ignoreexisting :
-            globdat.load_network('trained_network_%s.pt'%ARGS.output)
+            GLOBDAT.load_network('trained_network_%s.pt'%ARGS.output)
 
-        globdat.net.to(DEVICE)
+        GLOBDAT.net.to(DEVICE)
 
-        if ARGS.verbose :
+        if ARGS.verbose and not GPU_AVAIL :
             print 'Summary of %s'%ARGS.network
-            summary(globdat.net, (1, globdat.DM_sidelength, globdat.DM_sidelength, globdat.DM_sidelength))
+            summary(
+                GLOBDAT.net,
+                [
+                    (1, GLOBDAT.DM_sidelength, GLOBDAT.DM_sidelength, GLOBDAT.DM_sidelength),
+                    (1, GLOBDAT.gas_sidelength, GLOBDAT.gas_sidelength, GLOBDAT.gas_sidelength)
+                ]
+                )
 
-        loss_function = globdat.loss_function()
-        optimizer = globdat.optimizer()
-        lr_scheduler = globdat.lr_scheduler(optimizer)
-
-        # TODO
-        xx_val = []
-        yy_val = []
-        zz_val = []
-        # END TODO
-
-# TODO
-#        with InputData(globdat, 'training') as training_set, InputData(globdat, 'validation') as validation_set :
-        with InputData(globdat, 'validation') as validation_set :
+        loss_function = GLOBDAT.loss_function()
+        optimizer = GLOBDAT.optimizer()
+        lr_scheduler = GLOBDAT.lr_scheduler(optimizer)
 
 # TODO
-#            training_loader = globdat.data_loader(training_set)
+#        with InputData('training') as training_set, InputData('validation') as validation_set :
+        with InputData('validation') as validation_set :
+
+# TODO
+#            training_loader = GLOBDAT.data_loader(training_set)
 
             # keep the validation data always the same
             # (reduces noise in the output and makes diagnostics easier)
             validation_set.generate_rnd_indices()
-            validation_loader = globdat.data_loader(validation_set)
+            validation_loader = GLOBDAT.data_loader(validation_set)
 
             while True : # train until time is up
 
                 # loop over one epoch
-                globdat.net.train()
+                GLOBDAT.net.train()
 
                 # TODO
-                with InputData(globdat, 'training') as training_set :
-                    training_loader = globdat.data_loader(training_set)
+                with InputData('training') as training_set :
+                    training_loader = GLOBDAT.data_loader(training_set)
                 # END TODO
 
                     for t, data_train in enumerate(training_loader) :
                         
-                        # TODO
-                        xx_val.extend(list(data_train[-1].cpu().numpy()[:,0]))
-                        yy_val.extend(list(data_train[-1].cpu().numpy()[:,1]))
-                        zz_val.extend(list(data_train[-1].cpu().numpy()[:,2]))
-                        # END TODO
-
                         optimizer.zero_grad()
                         loss = loss_function(
-                            globdat.net(
-                                torch.autograd.Variable(data_train[0].to(DEVICE), requires_grad=False)
+                            GLOBDAT.net(
+                                torch.autograd.Variable(data_train[0].to(DEVICE), requires_grad=False),
+                                torch.autograd.Variable(data_train[2].to(DEVICE), requires_grad=False)
                                 ),
                             torch.autograd.Variable(data_train[1].to(DEVICE), requires_grad=False)
                             )
@@ -1060,45 +1156,39 @@ if __name__ == '__main__' :
                         if ARGS.verbose and not GPU_AVAIL :
                             print '\ttraining loss : %.3e'%loss.item()
 
-                        globdat.update_training_loss(loss.item())
+                        GLOBDAT.update_training_loss(loss.item())
                         loss.backward()
                         optimizer.step()
                         
-                        if globdat.stop_training() :
-                            globdat.save_loss('loss_%s.npz'%ARGS.output)
-                            globdat.save_network('trained_network_%s.pt'%ARGS.output)
+                        if GLOBDAT.stop_training() :
+                            GLOBDAT.save_loss('loss_%s.npz'%ARGS.output)
+                            GLOBDAT.save_network('trained_network_%s.pt'%ARGS.output)
                             sys.exit(0)
                     # end loop over one epoch
 
-                    # TODO
-                    np.savez(
-                        '/home/lthiele/DM_to_electrons/periodicity_troubleshooting_%s.npz'%ARGS.output,
-                        xx = np.array(xx_val),
-                        yy = np.array(yy_val),
-                        zz = np.array(zz_val),
-                        )
-                    # END TODO
+                # evaluate on the validation set
+                GLOBDAT.net.eval()
+                _loss = 0.0
+                for t_val, data_val in enumerate(validation_loader) :
+                    with torch.no_grad() :
+                        _loss += loss_function(
+                            GLOBDAT.net(
+                                torch.autograd.Variable(data_val[0].to(DEVICE), requires_grad=False),
+                                torch.autograd.Variable(data_val[2].to(DEVICE), requires_grad=False)
+                                ),
+                            torch.autograd.Variable(data_val[1].to(DEVICE), requires_grad=False)
+                            ).item()
+                # end evaluate on validation set
 
-                    # evaluate on the validation set
-                    globdat.net.eval()
-                    _loss = 0.0
-                    for t_val, data_val in enumerate(validation_loader) :
-                        with torch.no_grad() :
-                            _loss += loss_function(
-                                globdat.net(
-                                    torch.autograd.Variable(data_val[0], requires_grad=False).to(DEVICE)
-                                    ),
-                                torch.autograd.Variable(data_val[1], requires_grad=False).to(DEVICE)
-                                ).item()
-                    # end evaluate on validation set
+                if ARGS.verbose :
+                    print 'validation loss : %.6e'%(_loss/(t_val+1.0))
+                GLOBDAT.update_validation_loss(_loss/(t_val+1.0))
 
-                    if ARGS.verbose :
-                        print 'validation loss : %.6e'%(_loss/(t_val+1.0))
-                    globdat.update_validation_loss(_loss/(t_val+1.0))
+                if lr_scheduler is not None :
+                    lr_scheduler.step(_loss)
 
-                    if lr_scheduler is not None :
-                        lr_scheduler.step(_loss)
+                GLOBDAT.save_loss('loss_%s.npz'%ARGS.output)
+                GLOBDAT.save_network('trained_network_%s.pt'%ARGS.output)
 
-                    globdat.save_loss('loss_%s.npz'%ARGS.output)
-                    globdat.save_network('trained_network_%s.pt'%ARGS.output)
+                GLOBDAT.next_epoch()
     #}}}

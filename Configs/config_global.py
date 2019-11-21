@@ -40,6 +40,9 @@ this_config = {
                             'pos_mass_file': '/tigress/lthiele/Illustris_300-1_Dark/important_halos.hdf5',
                           },
 
+    # when to switch to the full network (after only seeing the model)
+    'pretraining_epochs': 30,
+
     # describes individual epochs
     'Nsamples': {
                     'training': 8192,

@@ -22,12 +22,6 @@ import argparse
 
 """
 TODO
-save additional information with trained network
-https://stackoverflow.com/questions/42703500/best-way-to-save-a-trained-model-in-pytorch
-e.g.    -- size of input (DM, gas, box size) [raise RuntimeError]
-        -- scaling [raise RuntimeError]
-        -- empty_fraction [print Warning]
-
 fix rescaling (make member fct of InputData?)
 
 !!! LOSS SEEMS PERIODIC -- WHAT'S GOING ON???
@@ -135,12 +129,38 @@ class _ArgParser(object) :#{{{
         # parse now
         self.__args = self.__parser.parse_args()
 
+        # set paths
+        sys.path.append(self.__parser.network_path)
+        sys.path.append(self.__parser.config_path)
+
         # consistency checks
         assert self.__args.mode    in _modes,    'Only %s modes implemented so far, passed %s.'%(_modes, self.__args.mode)
         assert self.__args.scaling in _scalings, 'Only %s scalings implemented so far, passed %s.'%(_scalings, self.__args.scaling)
+
+        # read config files
+        self.__final_config = self.__read_configs()
+    #}}}
+    def __read_configs(self) :#{{{
+        __configs = []
+        for c in self.__args.config :
+            __configs.append(import_module(c).this_config)
+        assert len(__configs) > 0
+        if self.__args.verbose :
+            for ii, c in enumerate(__configs) :
+                print '%s :'%self.__args.config[ii]
+                print c
+        for ii in xrange(1, len(__configs)) :
+            __configs[0] = __merge(__configs[ii], __configs[0])
+        if self.__args.verbose :
+            print 'Using the following configuration :'
+            print __configs[0]
+        return __configs[0]
     #}}}
     def __getattr__(self, name) :#{{{
         return self.__args.__getattribute__(name)
+    #}}}
+    def __getitem__(self, name) :#{{{
+        return self.__final_config[name]
     #}}}
 #}}}
 
@@ -169,50 +189,43 @@ def _merge(source, destination):#{{{
 #}}}
 
 class GlobalData(object) :#{{{
-    def __init__(self, *configs) :#{{{
-        configs = list(configs)
-        assert len(configs) > 0, 'You need to pass at least one config file.'
-
-        # merge config files
-        for ii in xrange(1, len(configs)) :
-            configs[0] = _merge(configs[ii], configs[0])
-
-        if ARGS.verbose :
-            print 'Using the following configuration :'
-            print configs[0]
-
+    def __init__(self) :#{{{
         # which box to work on
-        self.box_sidelength = configs[0]['box_sidelength']
-        self.gas_sidelength = (configs[0]['gas_sidelength']*self.box_sidelength)/2048
-        self.DM_sidelength  = (configs[0]['DM_sidelength']*self.box_sidelength)/2048
+        self.box_sidelength = ARGS['box_sidelength']
+        self.gas_sidelength = (ARGS['gas_sidelength']*self.box_sidelength)/2048
+        self.DM_sidelength  = (ARGS['DM_sidelength']*self.box_sidelength)/2048
         assert not self.gas_sidelength%2, 'Only even gas_sidelength is supported.'
         assert not self.DM_sidelength%2,  'Only even DM_sidelength is supported.'
 
         # training hyperparameters
-        self.__loss_function    = _namesofplaces[configs[0]['loss_function']]
-        self.__loss_function_kw = configs[0]['loss_function_%s_kw'%configs[0]['loss_function']]
+        self.__loss_function    = _namesofplaces[ARGS['loss_function']]
+        self.__loss_function_kw = ARGS['loss_function_%s_kw'%ARGS['loss_function']]
 
-        self.__optimizer        = _namesofplaces[configs[0]['optimizer']]
-        self.__optimizer_kw     = configs[0]['optimizer_%s_kw'%configs[0]['optimizer']]
+        self.__optimizer        = _namesofplaces[ARGS['optimizer']]
+        self.__optimizer_kw     = ARGS['optimizer_%s_kw'%ARGS['optimizer']]
 
-        self.Nsamples           = configs[0]['Nsamples']
+        self.Nsamples           = ARGS['Nsamples']
 
-        self.__data_loader_kw   = configs[0]['data_loader_kw']
+        self.__data_loader_kw   = ARGS['data_loader_kw']
         self.num_workers = self.__data_loader_kw['num_workers'] if 'num_workers' in self.__data_loader_kw else 1
 
-        self.__lr_scheduler     = _namesofplaces[configs[0]['lr_scheduler']]
+        self.__lr_scheduler     = _namesofplaces[ARGS['lr_scheduler']]
         if self.__lr_scheduler is not None :
-            self.__lr_scheduler_kw = configs[0]['lr_scheduler_%s_kw'%configs[0]['lr_scheduler']]
+            self.__lr_scheduler_kw = ARGS['lr_scheduler_%s_kw'%ARGS['lr_scheduler']]
 
         # sample selector
-        self.sample_selector_kw = configs[0]['sample_selector_kw']
+        self.sample_selector_kw = ARGS['sample_selector_kw']
 
         # pretraining
-        self.__pretraining_epochs = configs[0]['pretraining_epochs']
+        self.__pretraining_epochs = ARGS['pretraining_epochs']
+
+        # target transformation
+        self.__tau   = ARGS['target_transformation_kw']['tau']
+        self.__kappa = ARGS['target_transformation_kw']['kappa']
 
         # where to find and put data files
-        self.__input_path  = configs[0]['input_path']
-        self.__output_path = configs[0]['output_path']
+        self.__input_path  = ARGS['input_path']
+        self.__output_path = ARGS['output_path']
 
         if GPU_AVAIL :
             print 'Starting to copy data to /tmp'
@@ -291,18 +304,39 @@ class GlobalData(object) :#{{{
     def target_as_model(self) :#{{{
         return self.__epoch <= self.__pretraining_epochs/2
     #}}}
+    def target_transformation(self, x) :#{{{
+        __alpha = np.exp(-self.__epoch/self.__tau)
+        return __alpha * np.log10(1.0 + x) + (1.0 - __alpha) * x / self.__kappa
+    #}}}
     def stop_training(self) :#{{{
         return (time()-START_TIME)/60./60. > ARGS.time
     #}}}
     def save_network(self, name) :#{{{
-        torch.save(self.net.state_dict(), self.__output_path+name)
+        __state = {
+            'state_dict': self.net.state_dict(),
+            'consistency': {
+                'epoch': self.__epoch,
+                'box_sidelength': self.box_sidelength,
+                'DM_sidelength': self.DM_sidelength,
+                'gas_sidelength': self.gas_sidelength,
+                'scaling': ARGS.scaling,
+                },
+            }
+        torch.save(__state, self.__output_path + name)
     #}}}
     def load_network(self, name) :#{{{
         # need to initialize network first
         try :
-            self.net.load_state_dict(torch.load(self.__output_path+name, map_location='cuda:0' if GPU_AVAIL else 'cpu'))
+            __state = torch.load(self.__output_path + name)
+            self.net.load_state_dict(__state['state_dict'])
+            self.__epoch = __state['consistency']['epoch']
+            # Consistency checks
+            assert self.box_sidelength == __state['consistency']['box_sidelength'], 'Box sidelength does not match.'
+            assert self.DM_sidelength == __state['consistency']['DM_sidelength'], 'DM sidelength does not match.'
+            assert self.gas_sidelength == __state['consistency']['gas_sidelength'], 'gas sidelength does not match.'
+            assert ARGS.scaling == __state['consistency']['scaling'], 'scaling does not match.'
             if ARGS.verbose :
-                print 'Loaded network %s from disk.'%name
+                print 'Loaded network %s from disk,\n\tstarting at epoch %d.'%(name, self.__epoch)
         except IOError :
             if ARGS.verbose :
                 print 'Failed to load network %s from disk.\n Starting training with random initialization.'%name
@@ -565,19 +599,21 @@ class InputData(Dataset) :#{{{
         assert gas_model.shape[0] == gas_model.shape[1] == gas_model.shape[2] == GLOBDAT.gas_sidelength, gas_model.shape
 
         # TODO implement custom target transformation
+        gas = GLOBDAT.target_transformation(gas)
+        gas_model = GLOBDAT.target_transformation(gas_model)
         # TODO why do we need to .copy() again?
         if GLOBDAT.target_as_model() :
             return (
-                torch.from_numpy(DM.copy()).unsqueeze(0),
-                torch.from_numpy(np.log(gas.copy())).unsqueeze(0),
-                torch.from_numpy(np.log(gas.copy())).unsqueeze(0),
+                torch.from_numpy(DM).unsqueeze(0),
+                torch.from_numpy(gas).unsqueeze(0),
+                torch.from_numpy(gas).unsqueeze(0),
                 torch.from_numpy(np.array([__xx, __yy, __zz], dtype=int)),
                 )
         else :
             return (
-                torch.from_numpy(DM.copy()).unsqueeze(0),
-                torch.from_numpy(np.log(gas.copy())).unsqueeze(0),
-                torch.from_numpy(np.log(gas_model.copy())).unsqueeze(0),
+                torch.from_numpy(DM).unsqueeze(0),
+                torch.from_numpy(gas).unsqueeze(0),
+                torch.from_numpy(gas_model).unsqueeze(0),
                 torch.from_numpy(np.array([__xx, __yy, __zz], dtype=int)),
                 )
         # add fake dimension (channel dimension is 0 here)
@@ -785,6 +821,18 @@ class Network(nn.Module) :#{{{
     #}}}
 #}}}
 
+class CustomLoss(nn.Module) :#{{{
+    def __init__(self) :#{{{
+        super(Loss, self).__init__()
+    #}}}
+    def forward(self, pred, targ) :#{{{
+        torch.pow(pred, 4.0, out = pred)
+        torch.pow(targ, 4.0, out = targ)
+        torch.add(pred, targ, alpha = -1.0, out = targ)
+        return torch.abs(torch.sum(targ))
+    #}}}
+#}}}
+
 class Mesh(object) :#{{{
     def __init__(self, arr) :#{{{
         self.arr = arr
@@ -924,22 +972,13 @@ if __name__ == '__main__' :
     # set global variables#{{{
     global ARGS
     global START_TIME
-    global CONFIGS
     global GPU_AVAIL
     global DEVICE
     global GLOBDAT
 
     START_TIME = time()
     ARGS = _ArgParser()
-    sys.path.append(ARGS.network_path)
-    sys.path.append(ARGS.config_path)
-    CONFIGS = []
-    for c in ARGS.config :
-        CONFIGS.append(import_module(c).this_config)
-    if ARGS.verbose :
-        for ii in xrange(len(ARGS.config)) :
-            print '%s :'%ARGS.config[ii]
-            print CONFIGS[ii]
+    GLOBDAT = GlobalData()
     GPU_AVAIL = torch.cuda.is_available()
     if GPU_AVAIL :
         print 'Found %d GPUs.'%torch.cuda.device_count()
@@ -952,10 +991,7 @@ if __name__ == '__main__' :
     #}}}
 
     # OUTPUT VALIDATION
-    if ARGS.mode=='valid' :#{{{
-
-        GLOBDAT = GlobalData(*CONFIGS)
-
+    if ARGS.mode == 'valid' :#{{{
 # TODO
 #        try :
         GLOBDAT.net = nn.DataParallel(Network(import_module(ARGS.network).this_network))
@@ -1092,10 +1128,7 @@ if __name__ == '__main__' :
     #}}}
 
     # TRAINING
-    if ARGS.mode=='train' :#{{{
-
-        GLOBDAT = GlobalData(*CONFIGS)
-
+    if ARGS.mode == 'train' :#{{{
         GLOBDAT.net = Network(import_module(ARGS.network).this_network)
 
         if ARGS.verbose :

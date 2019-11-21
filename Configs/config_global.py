@@ -43,6 +43,14 @@ this_config = {
     # when to switch to the full network (after only seeing the model)
     'pretraining_epochs': 30,
 
+    # target transformation
+    'target_transformation': True,
+    'target_transformation_kw': {
+                                    # time constant for decay of the log term (in epochs)
+                                    'tau': 60,
+                                    'kappa': 1.0, # TODO
+                                },
+
     # describes individual epochs
     'Nsamples': {
                     'training': 8192,

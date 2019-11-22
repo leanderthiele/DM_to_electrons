@@ -5,6 +5,7 @@ from os import system
 import sys
 from importlib import import_module
 import numpy as np
+from scipy.special import wrightomega
 from nbodykit.lab import ArrayMesh, FFTPower
 import h5py
 from mpi4py import MPI
@@ -35,6 +36,30 @@ maybe want to learn on log and do biasing in loss function?
 """
 
 MAX_SEED = 2**32
+
+_namesofplaces = {#{{{
+    'Conv': nn.Conv3d,
+    'ConvTranspose': nn.ConvTranspose3d,
+    'BatchNorm': nn.BatchNorm3d,
+    'ReLU': nn.ReLU,
+    'LeakyReLU': nn.LeakyReLU,
+    'MSELoss': nn.MSELoss,
+    'L1Loss': nn.L1Loss,
+    'Adam': torch.optim.Adam,
+    'ReduceLROnPlateau': torch.optim.lr_scheduler.ReduceLROnPlateau,
+    'None': None,
+    }
+#}}}
+def _merge(source, destination):#{{{
+    # overwrites field in destination if field exists in source, otherwise just merges
+    for key, value in source.items():
+        if isinstance(value, dict):
+            node = destination.setdefault(key, {})
+            _merge(value, node)
+        else:
+            destination[key] = value
+    return destination
+#}}}
 
 class _ArgParser(object) :#{{{
     def __init__(self) :#{{{
@@ -107,6 +132,11 @@ class _ArgParser(object) :#{{{
             help = 'If several GPUs are available.',
             )
         self.__parser.add_argument(
+            '-d', '--debug',
+            action = 'store_true',
+            help = 'For short debugging runs.'
+            )
+        self.__parser.add_argument(
             '--ignoreexisting',
             action = 'store_true',
             help = 'If this flag is set, training will start at random initialization,\
@@ -130,8 +160,8 @@ class _ArgParser(object) :#{{{
         self.__args = self.__parser.parse_args()
 
         # set paths
-        sys.path.append(self.__parser.network_path)
-        sys.path.append(self.__parser.config_path)
+        sys.path.append(self.__args.network_path)
+        sys.path.append(self.__args.config_path)
 
         # consistency checks
         assert self.__args.mode    in _modes,    'Only %s modes implemented so far, passed %s.'%(_modes, self.__args.mode)
@@ -150,7 +180,7 @@ class _ArgParser(object) :#{{{
                 print '%s :'%self.__args.config[ii]
                 print c
         for ii in xrange(1, len(__configs)) :
-            __configs[0] = __merge(__configs[ii], __configs[0])
+            __configs[0] = _merge(__configs[ii], __configs[0])
         if self.__args.verbose :
             print 'Using the following configuration :'
             print __configs[0]
@@ -162,30 +192,6 @@ class _ArgParser(object) :#{{{
     def __getitem__(self, name) :#{{{
         return self.__final_config[name]
     #}}}
-#}}}
-
-_namesofplaces = {#{{{
-    'Conv': nn.Conv3d,
-    'ConvTranspose': nn.ConvTranspose3d,
-    'BatchNorm': nn.BatchNorm3d,
-    'ReLU': nn.ReLU,
-    'LeakyReLU': nn.LeakyReLU,
-    'MSELoss': nn.MSELoss,
-    'L1Loss': nn.L1Loss,
-    'Adam': torch.optim.Adam,
-    'ReduceLROnPlateau': torch.optim.lr_scheduler.ReduceLROnPlateau,
-    'None': None,
-    }
-#}}}
-def _merge(source, destination):#{{{
-    # overwrites field in destination if field exists in source, otherwise just merges
-    for key, value in source.items():
-        if isinstance(value, dict):
-            node = destination.setdefault(key, {})
-            _merge(value, node)
-        else:
-            destination[key] = value
-    return destination
 #}}}
 
 class GlobalData(object) :#{{{
@@ -220,14 +226,16 @@ class GlobalData(object) :#{{{
         self.__pretraining_epochs = ARGS['pretraining_epochs']
 
         # target transformation
-        self.__tau   = ARGS['target_transformation_kw']['tau']
-        self.__kappa = ARGS['target_transformation_kw']['kappa']
+        #   want the target transformation to happen on GPU, so push these there
+        self.__tau   = ARGS['target_transformation_kw']['tau'])
+        self.__gamma = ARGS['target_transformation_kw']['gamma'])
+        self.__kappa = ARGS['target_transformation_kw']['kappa'])
 
         # where to find and put data files
         self.__input_path  = ARGS['input_path']
         self.__output_path = ARGS['output_path']
 
-        if GPU_AVAIL :
+        if GPU_AVAIL and not ARGS.debug :
             print 'Starting to copy data to /tmp'
             system('cp %s%s/size_%d.hdf5 /tmp/'%(self.__input_path, ARGS.scaling, self.box_sidelength))
             print 'Finished copying data to /tmp, took %.2e seconds'%(time()-START_TIME) # 4.06e+02 sec for 2048, ~12 sec for 1024
@@ -285,15 +293,6 @@ class GlobalData(object) :#{{{
         self.validation_loss.append(this_loss)
         self.validation_steps.append(len(self.training_loss))
     #}}}
-    def save_loss(self, name) :#{{{
-        np.savez(
-            self.__output_path+name,
-            training_steps = self.training_steps,
-            training_loss = self.training_loss,
-            validation_steps = self.validation_steps,
-            validation_loss = self.validation_loss,
-            )
-    #}}}
     def next_epoch(self) :#{{{
         self.__epoch += 1
         # perhaps some other code if desired
@@ -305,24 +304,53 @@ class GlobalData(object) :#{{{
         return self.__epoch <= self.__pretraining_epochs/2
     #}}}
     def target_transformation(self, x) :#{{{
-        __alpha = np.exp(-self.__epoch/self.__tau)
-        return __alpha * np.log10(1.0 + x) + (1.0 - __alpha) * x / self.__kappa
+        __alpha = torch.exp(
+            - torch.tensor(self.__epoch).to(x.device, dtype = torch.float32)
+            / torch.tensor(self.__tau).to(x.device, dtype = torch.float32)
+            )
+        return (
+            __alpha * torch.log(1.0 + x / torch.tensor(self.__gamma).to(x.device, dtype = torch.float32))
+            + (1.0 - __alpha) * x / torch.tensor(self.__kappa).to(x.device, dtype = torch.float32)
+            )
+    #}}}
+    def inv_target_transformation(self, y) :#{{{
+        __alpha = np.exp(-float(self.__epoch)/float(self.__tau))
+        __ybar = (y+(1.0-__alpha)/self.__kappa)/__alpha - np.log(__alpha*self.__kappa/(1.0-__alpha))
+        __xbar = wrightomega(__ybar)
+        return np.real(__alpha*self.__kappa*__xbar/(1.0-__alpha) - 1.0)
     #}}}
     def stop_training(self) :#{{{
         return (time()-START_TIME)/60./60. > ARGS.time
     #}}}
+    def save_loss(self, name) :#{{{
+        if not ARGS.debug :
+            np.savez(
+                self.__output_path+name,
+                training_steps = self.training_steps,
+                training_loss = self.training_loss,
+                validation_steps = self.validation_steps,
+                validation_loss = self.validation_loss,
+                )
+        else :
+            if ARGS.verbose :
+                print 'Not saving loss since in debugging mode.'
+    #}}}
     def save_network(self, name) :#{{{
-        __state = {
-            'state_dict': self.net.state_dict(),
-            'consistency': {
-                'epoch': self.__epoch,
-                'box_sidelength': self.box_sidelength,
-                'DM_sidelength': self.DM_sidelength,
-                'gas_sidelength': self.gas_sidelength,
-                'scaling': ARGS.scaling,
-                },
-            }
-        torch.save(__state, self.__output_path + name)
+        if not ARGS.debug :
+            __state = {
+                'state_dict': self.net.state_dict(),
+                'consistency': {
+                    'epoch': self.__epoch,
+                    'box_sidelength': self.box_sidelength,
+                    'DM_sidelength': self.DM_sidelength,
+                    'gas_sidelength': self.gas_sidelength,
+                    'scaling': ARGS.scaling,
+                    },
+                }
+            torch.save(__state, self.__output_path + name)
+        else :
+            if ARGS.verbose :
+                print 'Not saving network since in debugging mode.'
     #}}}
     def load_network(self, name) :#{{{
         # need to initialize network first
@@ -598,22 +626,19 @@ class InputData(Dataset) :#{{{
         assert gas.shape[0] == gas.shape[1] == gas.shape[2] == GLOBDAT.gas_sidelength, gas.shape
         assert gas_model.shape[0] == gas_model.shape[1] == gas_model.shape[2] == GLOBDAT.gas_sidelength, gas_model.shape
 
-        # TODO implement custom target transformation
-        gas = GLOBDAT.target_transformation(gas)
-        gas_model = GLOBDAT.target_transformation(gas_model)
         # TODO why do we need to .copy() again?
         if GLOBDAT.target_as_model() :
             return (
-                torch.from_numpy(DM).unsqueeze(0),
-                torch.from_numpy(gas).unsqueeze(0),
-                torch.from_numpy(gas).unsqueeze(0),
+                torch.from_numpy(DM.copy()).unsqueeze(0),
+                torch.from_numpy(gas.copy()).unsqueeze(0),
+                torch.from_numpy(gas.copy()).unsqueeze(0),
                 torch.from_numpy(np.array([__xx, __yy, __zz], dtype=int)),
                 )
         else :
             return (
-                torch.from_numpy(DM).unsqueeze(0),
-                torch.from_numpy(gas).unsqueeze(0),
-                torch.from_numpy(gas_model).unsqueeze(0),
+                torch.from_numpy(DM.copy()).unsqueeze(0),
+                torch.from_numpy(gas.copy()).unsqueeze(0),
+                torch.from_numpy(gas_model.copy()).unsqueeze(0),
                 torch.from_numpy(np.array([__xx, __yy, __zz], dtype=int)),
                 )
         # add fake dimension (channel dimension is 0 here)
@@ -970,15 +995,13 @@ class Analysis(object) :#{{{
 
 if __name__ == '__main__' :
     # set global variables#{{{
-    global ARGS
     global START_TIME
     global GPU_AVAIL
     global DEVICE
+    global ARGS
     global GLOBDAT
 
     START_TIME = time()
-    ARGS = _ArgParser()
-    GLOBDAT = GlobalData()
     GPU_AVAIL = torch.cuda.is_available()
     if GPU_AVAIL :
         print 'Found %d GPUs.'%torch.cuda.device_count()
@@ -988,6 +1011,8 @@ if __name__ == '__main__' :
         print 'Could not find GPU.'
         torch.set_num_threads(2)
         DEVICE = torch.device('cpu')
+    ARGS = _ArgParser()
+    GLOBDAT = GlobalData()
     #}}}
 
     # OUTPUT VALIDATION
@@ -1178,12 +1203,14 @@ if __name__ == '__main__' :
                     for t, data_train in enumerate(training_loader) :
                         
                         optimizer.zero_grad()
+                        __pred = GLOBDAT.net(
+                            torch.autograd.Variable(data_train[0].to(DEVICE), requires_grad=False),
+                            torch.autograd.Variable(data_train[2].to(DEVICE), requires_grad=False)
+                            )
+                        __targ = torch.autograd.Variable(data_train[1].to(DEVICE), requires_grad=False)
                         loss = loss_function(
-                            GLOBDAT.net(
-                                torch.autograd.Variable(data_train[0].to(DEVICE), requires_grad=False),
-                                torch.autograd.Variable(data_train[2].to(DEVICE), requires_grad=False)
-                                ),
-                            torch.autograd.Variable(data_train[1].to(DEVICE), requires_grad=False)
+                            GLOBDAT.target_transformation(__pred),
+                            GLOBDAT.target_transformation(__targ)
                             )
                         
                         if ARGS.verbose and not GPU_AVAIL :
@@ -1204,13 +1231,12 @@ if __name__ == '__main__' :
                 _loss = 0.0
                 for t_val, data_val in enumerate(validation_loader) :
                     with torch.no_grad() :
-                        _loss += loss_function(
-                            GLOBDAT.net(
-                                torch.autograd.Variable(data_val[0].to(DEVICE), requires_grad=False),
-                                torch.autograd.Variable(data_val[2].to(DEVICE), requires_grad=False)
-                                ),
-                            torch.autograd.Variable(data_val[1].to(DEVICE), requires_grad=False)
-                            ).item()
+                        __pred = GLOBDAT.net(
+                            torch.autograd.Variable(data_val[0].to(DEVICE), requires_grad=False),
+                            torch.autograd.Variable(data_val[2].to(DEVICE), requires_grad=False)
+                            )
+                        __targ = torch.autograd.Variable(data_val[1].to(DEVICE), requires_grad=False)
+                        _loss += loss_function(__pred, __targ).item()
                 # end evaluate on validation set
 
                 if ARGS.verbose :

@@ -20,7 +20,7 @@ this_config = {
     # optimizer
     'optimizer': 'Adam',
     'optimizer_Adam_kw': {
-                            'lr': 1e-5,
+                            'lr': 1e-4,
                             'betas': (0.9, 0.999),
                             'eps': 1e-8,
                             'weight_decay': 0.0,
@@ -50,8 +50,8 @@ this_config = {
                                     # alpha = exp( - epoch / tau)
                                     'tau': 60,
                                     # the transformation is given by
-                                    # f(x) = alpha * log(1 + x/gamma) + (1-alpha)*x/kappa
-                                    'gamma': 1.0,
+                                    # f(x) = kappa * alpha * log(1 + x/gamma) + (1-alpha)*x
+                                    'gamma': 0.1,
                                     'kappa': 1.0,
                                 },
 

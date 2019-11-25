@@ -112,13 +112,27 @@ class _ArgParser(object) :#{{{
             help = 'Maximum runtime in hrs.'
             )
         self.__parser.add_argument(
-            '-pkfid', '--powerspectrumfid',
+            '-psfid', '--powerspectrumfid',
             nargs = '?',
+            default = 'psfid',
             help = 'File storing/to store fiducial powerspectrum.'
             )
         self.__parser.add_argument(
             '-pspred', '--powerspectrumpred',
             nargs = '?',
+            default = 'pspred',
+            help = 'File storing/to store predicted powerspectrum.'
+            )
+        self.__parser.add_argument(
+            '-opfid', '--onepointfid',
+            nargs = '?',
+            default = 'opfid',
+            help = 'File storing/to store fiducial powerspectrum.'
+            )
+        self.__parser.add_argument(
+            '-oppred', '--onepointpred',
+            nargs = '?',
+            default = 'oppred',
             help = 'File storing/to store predicted powerspectrum.'
             )
         self.__parser.add_argument(
@@ -514,7 +528,7 @@ class InputData(Dataset) :#{{{
             if self.mode == 'training' :
                 self.rnd_generators.append(np.random.RandomState((hash(str(clock()+ii))+hash(self.mode))%MAX_SEED))
             elif self.mode == 'validation' :
-                self.rnd_generators.append(np.random.RandomState(ii) # use always the same seed for validation set (easier comparison)
+                self.rnd_generators.append(np.random.RandomState(ii)) # use always the same seed for validation set (easier comparison)
 
         # read the backward transformations
         self.get_back = {}
@@ -893,7 +907,7 @@ class Mesh(object) :#{{{
             raise RuntimeError('Not set the array yet for Mesh.')
         else :
             self.mesh = ArrayMesh(
-                self.arr,
+                self.arr - np.mean(self.arr),
                 BoxSize=(GLOBDAT.box_size/float(GLOBDAT.box_sidelength))*np.array(self.arr.shape)
                 )
     #}}}
@@ -950,63 +964,63 @@ class Analysis(object) :#{{{
     #}}}
     def compute_powerspectrum(self, mode) :#{{{
         if mode is 'original' :
-            if self.original_power_spectrum is not None :
-                if ARGS.verbose :
-                    print 'Already computed this original power spectrum. No action taken.'
-            elif ARGS.powerspectrumfid is not None :
-                try :
-                    f = np.load('%s.npz'%ARGS.powerspectrumfid)
-                    self.original_power_spectrum = {
-                        'k': f['k'],
-                        'P': f['P'],
-                        }
-                    if ARGS.verbose :
-                        print 'Read original power spectrum from %s.npz'%ARGS.powerspectrumfid
-                except IOError :
-                    r = self.original_field_mesh.compute_powerspectrum()
-                    self.original_power_spectrum = {
-                        'k': r.power['k'],
-                        'P': r.power['power'].real,
-                        }
-                    np.savez(
-                        '%s.npz'%ARGS.powerspectrumfid,
-                        k = self.original_power_spectrum['k'],
-                        P = self.original_power_spectrum['P'],
-                        )
-                    if ARGS.verbose :
-                        print 'Computed original power spectrum and saved to %s.npz'%ARGS.powerspectrumfid
-            else :
-                self.original_power_spectrum = self.original_field_mesh.compute_powerspectrum()
+            r = self.original_field_mesh.compute_powerspectrum()
+            self.original_power_spectrum = {
+                'k': r.power['k'],
+                'P': r.power['power'].real,
+                }
+            np.savez(
+                '%s.npz'%ARGS.powerspectrumfid,
+                k = self.original_power_spectrum['k'],
+                P = self.original_power_spectrum['P'],
+                )
+            if ARGS.verbose :
+                print 'Computed original power spectrum and saved to %s.npz'%ARGS.powerspectrumfid
         elif mode is 'predicted' :
-            if self.predicted_power_spectrum is not None :
-                if ARGS.verbose :
-                    print 'Already computed this predicted power spectrum. No action taken.'
-            elif ARGS.powerspectrumpred is not None :
-                try :
-                    f = np.load('%s_%s.npz'%(ARGS.powerspectrumpred, ARGS.output))
-                    self.predicted_power_spectrum = {
-                        'k': f['k'],
-                        'P': f['P'],
-                        }
-                    if ARGS.verbose :
-                        print 'Read predicted power spectrum from %s_%s.npz'%(ARGS.powerspectrumpred, ARGS.output)
-                except IOError :
-                    r = self.predicted_field_mesh.compute_powerspectrum()
-                    self.predicted_power_spectrum = {
-                        'k': r.power['k'],
-                        'P': r.power['power'].real,
-                        }
-                    np.savez(
-                        '%s_%s.npz'%(ARGS.powerspectrumpred, ARGS.output),
-                        k = self.predicted_power_spectrum['k'],
-                        P = self.predicted_power_spectrum['P'],
-                        )
-                    if ARGS.verbose :
-                        print 'Computed predicted power spectrum and saved to %s_%s.npz'%(ARGS.powerspectrumpred, ARGS.output)
-            else :
-                self.predicted_power_spectrum = self.predicted_field_mesh.compute_powerspectrum()
+            r = self.predicted_field_mesh.compute_powerspectrum()
+            self.predicted_power_spectrum = {
+                'k': r.power['k'],
+                'P': r.power['power'].real,
+                }
+            np.savez(
+                '%s_%s.npz'%(ARGS.powerspectrumpred, ARGS.output),
+                k = self.predicted_power_spectrum['k'],
+                P = self.predicted_power_spectrum['P'],
+                )
+            if ARGS.verbose :
+                print 'Computed predicted power spectrum and saved to %s_%s.npz'%(ARGS.powerspectrumpred, ARGS.output)
         else :
             raise RuntimeError('Invalid mode in compute_powerspectrum, only original and predicted allowed.')
+    #}}}
+    def compute_onepoint(self, mode) :#{{{
+        if mode is 'original' :
+            h, edges = np.histogram(
+                self.original_field,
+                bins = np.linspace(1e-2, 1e1, num = 101),
+                density = False,
+                )
+            h = h.astype(float)/float(self.original_field.size)
+            np.savez(
+                '%s.npz'%ARGS.onepointfid,
+                h = h,
+                edges = edges,
+                )
+            if ARGS.verbose :
+                print 'Computed fiducial one-point PDF and saved to %s.npz'%ARGS.onepointfid
+        elif mode is 'predicted' :
+            h, edges = np.histogram(
+                self.predicted_field,
+                bins = np.linspace(1e-2, 1e1, num = 101),
+                density = False,
+                )
+            h = h.astype(float)/float(self.predicted_field.size)
+            np.savez(
+                '%s_%s.npz'%(ARGS.onepointpred, ARGS.output),
+                h = h,
+                edges = edges,
+                )
+            if ARGS.verbose :
+                print 'Computed predicted one-point PDF and saved to %s_%s.npz'%(ARGS.onepointpred, ARGS.output)
     #}}}
 #}}}
 
@@ -1155,13 +1169,15 @@ if __name__ == '__main__' :
 
                 a.read_original()
                 a.compute_powerspectrum('original')
+                a.compute_onepoint('original')
                 a.predict_whole_volume()
-                np.savez(
-                    '/scratch/gpfs/lthiele/whole_volume.npz',
-                    pred = a.predicted_field,
-                    orig = a.original_field
-                    )
+#                np.savez(
+#                    '/scratch/gpfs/lthiele/whole_volume.npz',
+#                    pred = a.predicted_field,
+#                    orig = a.original_field
+#                    )
                 a.compute_powerspectrum('predicted')
+                a.compute_onepoint('predicted')
 
                 if False :
                     plt.loglog(

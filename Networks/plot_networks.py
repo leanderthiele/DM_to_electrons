@@ -38,6 +38,8 @@ class LayerMode(object) :#{{{
 class ArrowMode(object) :#{{{
     def __init__(self, layer_dict) :
         self.conv = layer_dict['conv']
+        if self.conv is 'Copy' :
+            self.resize_to_gas = layer_dict['resize_to_gas'] if 'resize_to_gas' in layer_dict else False
         if self.conv is not 'Copy' :
             self.padding = layer_dict['conv_kw']['padding']
             self.stride = layer_dict['conv_kw']['stride']
@@ -47,7 +49,13 @@ class ArrowMode(object) :#{{{
             self.outplane = layer_dict['outplane']
     def out_layer(self, in_layer) :
         if self.conv is 'Copy' :
-            return in_layer
+            if self.resize_to_gas :
+                return LayerMode(
+                    in_layer.Nchannels,
+                    DIM_OUT
+                    )
+            else :
+                return in_layer
         elif self.conv is 'Conv' :
             assert self.inplane == in_layer.Nchannels, '%d vs %d'%(self.inplane, in_layer.Nchannels)
             return LayerMode(
@@ -288,7 +296,7 @@ for key, value in __default_param_flat.items() :
     if key is 'inplane' or key is 'outplane': continue
     __default_param_text += r'\mbox{\texttt{%s:%s}}, '%(key,value)
 
-def draw_network(index) :#{{{
+def draw_network(name) :#{{{
     global FILE
     global NLevels
 
@@ -348,12 +356,25 @@ def draw_network(index) :#{{{
         a = Arrow(l, Point(xx*HORI, ii*VERT), amode)
         a.draw()
         if this_network['Level_%d'%ii]['concat'] :
-            amode_cat = ArrowMode({'conv': 'Copy'})
+            amode_cat = ArrowMode({
+                'conv': 'Copy',
+                'resize_to_gas': this_network['Level_%d'%ii]['resize_to_gas'] if 'resize_to_gas' in this_network['Level_%d'%ii] else False
+                })
             a = Arrow(Layer(Point(level_states[ii].xx*HORI, ii*VERT), level_states[ii]), Point(xx*HORI, ii*VERT), amode_cat)
             a.draw()
-            level_states[ii] = level_states[ii] + level_states[ii+1]
+            level_states[ii] = amode_cat.out_layer(level_states[ii]) + level_states[ii+1]
         else :
             level_states[ii] = level_states[ii+1]
+        if ii == 0 and (this_network['feed_model'] if 'feed_model' in this_network else False) :
+            feed_state = LayerMode(1, DIM_OUT)
+            feed_layer = Layer(Point((xx-2)*HORI, -4*VERT), feed_state)
+            feed_layer.add_text(r'\textbf{Model}')
+            feed_layer.draw()
+            feed_layer.set_text()
+            amode_feed = ArrowMode({'conv': 'Copy'})
+            a_feed = Arrow(feed_layer, Point(xx*HORI, ii*VERT), amode_feed)
+            a_feed.draw()
+            level_states[ii] = level_states[ii] + amode_feed.out_layer(feed_state)
         l = Layer(Point(xx*HORI, ii*VERT), level_states[ii])
         l.draw()
         xx += 1
@@ -379,6 +400,7 @@ def draw_network(index) :#{{{
 
     FILE.close()
 #}}}
+
 
 index = 0
 while True :

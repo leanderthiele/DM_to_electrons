@@ -4,12 +4,15 @@
 \usepackage{underscore}
 \usepackage[left=1cm,right=1cm,top=2cm,bottom=2cm]{geometry}
 \usepackage{tikz}
+\tikzset{
+	font={\fontsize{5pt}{12}\selectfont}
+	}
 
 \newcommand\singlenetwork[1]{
 	\begin{figure}
 		\centering
 
-		\begin{tikzpicture}
+		\begin{tikzpicture}[scale=0.6]
 		\input{#1}
 		\end{tikzpicture}
 		\caption*{
@@ -29,5 +32,7 @@
 \singlenetwork{network3}
 \singlenetwork{network4}
 \singlenetwork{network5}
+\singlenetwork{network6}
+\singlenetwork{network7}
 
 \end{document}

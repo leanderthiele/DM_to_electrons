@@ -37,6 +37,31 @@ maybe want to learn on log and do biasing in loss function?
 
 MAX_SEED = 2**32
 
+class CustomLoss(nn.Module) :#{{{
+    def __init__(self) :#{{{
+        super(CustomLoss, self).__init__()
+    #}}}
+    def forward(self, pred, targ) :#{{{
+        torch.pow(pred, 4.0, out = pred)
+        torch.pow(targ, 4.0, out = targ)
+        torch.add(pred, targ, alpha = -1.0, out = targ)
+        return torch.abs(torch.sum(targ))
+    #}}}
+#}}}
+
+class LnLoss(nn.Module) :#{{{
+    def __init__(self, **kwargs) :#{{{
+        super(LnLoss, self).__init__()
+        self.__pwr = kwargs['pwr']
+    #}}}
+    def forward(self, pred, targ) :#{{{
+        return torch.sum(torch.pow(
+            torch.abs(torch.add(pred, targ, alpha = -1.0)),
+            torch.tensor(self.__pwr, requires_grad = False).to(pred.device, dtype = torch.float32)
+            ))
+    #}}}
+#}}}
+
 _namesofplaces = {#{{{
     'Conv': nn.Conv3d,
     'ConvTranspose': nn.ConvTranspose3d,
@@ -45,8 +70,10 @@ _namesofplaces = {#{{{
     'LeakyReLU': nn.LeakyReLU,
     'MSELoss': nn.MSELoss,
     'L1Loss': nn.L1Loss,
+    'LnLoss': LnLoss,
     'Adam': torch.optim.Adam,
     'ReduceLROnPlateau': torch.optim.lr_scheduler.ReduceLROnPlateau,
+    'StepLR': torch.optim.lr_scheduler.StepLR,
     'None': None,
     }
 #}}}
@@ -276,7 +303,7 @@ class GlobalData(object) :#{{{
         self.__epoch = 1
     #}}}
     def loss_function(self) :#{{{
-        return self.__loss_function()
+        return self.__loss_function(**self.__loss_function_kw)
     #}}}
     def optimizer(self) :#{{{
         return self.__optimizer(
@@ -327,7 +354,7 @@ class GlobalData(object) :#{{{
                 torch.exp(- __t) * torch.log1p(x) / torch.tensor(self.__gamma, requires_grad = False).to(x.device, dtype = torch.float32)
                 * torch.tensor(self.__kappa, requires_grad = False).to(x.device, dtype = torch.float32)
             )
-            - torch.expm1(- __t) * x
+            - torch.expm1(- __t) / torch.tensor(self.__gamma, requires_grad = False).to(x.device, dtype = torch.float32) * x
             )
     #}}}
     def inv_target_transformation(self, y) :#{{{
@@ -883,18 +910,6 @@ class Network(nn.Module) :#{{{
     #}}}
 #}}}
 
-class CustomLoss(nn.Module) :#{{{
-    def __init__(self) :#{{{
-        super(Loss, self).__init__()
-    #}}}
-    def forward(self, pred, targ) :#{{{
-        torch.pow(pred, 4.0, out = pred)
-        torch.pow(targ, 4.0, out = targ)
-        torch.add(pred, targ, alpha = -1.0, out = targ)
-        return torch.abs(torch.sum(targ))
-    #}}}
-#}}}
-
 class Mesh(object) :#{{{
     def __init__(self, arr) :#{{{
         self.arr = arr
@@ -1000,10 +1015,16 @@ class Analysis(object) :#{{{
                 density = False,
                 )
             h = h.astype(float)/float(self.original_field.size)
+            mean_all = np.mean(self.original_field)
+            std_all  = np.std(self.original_field)
+            mean_high = np.mean(self.original_field[self.original_field>std_all])
             np.savez(
                 '%s.npz'%ARGS.onepointfid,
                 h = h,
                 edges = edges,
+                mean_all = mean_all,
+                std_all = std_all,
+                mean_high = mean_high,
                 )
             if ARGS.verbose :
                 print 'Computed fiducial one-point PDF and saved to %s.npz'%ARGS.onepointfid
@@ -1014,10 +1035,16 @@ class Analysis(object) :#{{{
                 density = False,
                 )
             h = h.astype(float)/float(self.predicted_field.size)
+            mean_all = np.mean(self.predicted_field)
+            std_all = np.std(self.predicted_field)
+            mean_high = np.mean(self.predicted_field[self.predicted_field>std_all])
             np.savez(
                 '%s_%s.npz'%(ARGS.onepointpred, ARGS.output),
                 h = h,
                 edges = edges,
+                mean_all = mean_all,
+                std_all = std_all,
+                mean_high = mean_high,
                 )
             if ARGS.verbose :
                 print 'Computed predicted one-point PDF and saved to %s_%s.npz'%(ARGS.onepointpred, ARGS.output)
@@ -1167,9 +1194,9 @@ if __name__ == '__main__' :
 
                 a = Analysis(validation_set)
 
-                a.read_original()
-                a.compute_powerspectrum('original')
-                a.compute_onepoint('original')
+#                a.read_original()
+#                a.compute_powerspectrum('original')
+#                a.compute_onepoint('original')
                 a.predict_whole_volume()
 #                np.savez(
 #                    '/scratch/gpfs/lthiele/whole_volume.npz',
@@ -1219,7 +1246,8 @@ if __name__ == '__main__' :
                 ]
                 )
 
-        loss_function = GLOBDAT.loss_function()
+        loss_function_train = GLOBDAT.loss_function()
+        loss_function_valid = nn.L1Loss()
         optimizer = GLOBDAT.optimizer()
         lr_scheduler = GLOBDAT.lr_scheduler(optimizer)
 
@@ -1258,7 +1286,7 @@ if __name__ == '__main__' :
 #                            plt.matshow(GLOBDAT.target_transformation(__targ).cpu().numpy()[ii,0,8,:,:])
 #                            plt.show()
                         # END TODO
-                        loss = loss_function(
+                        loss = loss_function_train(
                             GLOBDAT.target_transformation(__pred),
                             GLOBDAT.target_transformation(__targ)
                             )
@@ -1286,7 +1314,7 @@ if __name__ == '__main__' :
                             torch.autograd.Variable(data_val[2].to(DEVICE), requires_grad=False)
                             )
                         __targ = torch.autograd.Variable(data_val[1].to(DEVICE), requires_grad=False)
-                        _loss += loss_function(__pred, __targ).item()
+                        _loss += loss_function_valid(__pred, __targ).item()
                 # end evaluate on validation set
 
                 if ARGS.verbose :
@@ -1294,7 +1322,12 @@ if __name__ == '__main__' :
                 GLOBDAT.update_validation_loss(_loss/(t_val+1.0))
 
                 if lr_scheduler is not None :
-                    lr_scheduler.step(_loss)
+                    if isinstance(lr_scheduler, _namesofplaces['ReduceLROnPlateau']) :
+                        lr_scheduler.step(_loss)
+                    elif isinstance(lr_scheduler, _namesofplaces['StepLR']) :
+                        lr_scheduler.step()
+                    else :
+                        raise NotImplementedError('Unknown learning rate scheduler, do not know how to call.')
 
                 GLOBDAT.save_loss('loss_%s.npz'%ARGS.output)
                 GLOBDAT.save_network('trained_network_%s.pt'%ARGS.output)

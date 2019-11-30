@@ -48,7 +48,7 @@ this_config = {
     'target_transformation_kw': {
                                     # time constant for decay of the log term (in epochs)
                                     # alpha = exp( - epoch / tau)
-                                    'tau': 60,
+                                    'tau': 300,
                                     # the transformation is given by
                                     # f(x) = kappa * alpha * log(1 + x/gamma) + (1-alpha)*x
                                     'gamma': 0.1,

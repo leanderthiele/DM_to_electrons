@@ -23,16 +23,7 @@ import argparse
 
 """
 TODO
-fix rescaling (make member fct of InputData?)
-
 !!! LOSS SEEMS PERIODIC -- WHAT'S GOING ON???
-
-clean the model feed
-
-input normalization w/ bias ???
-
-maybe want to learn on log and do biasing in loss function?
-    --> would keep weights of comparable size
 """
 
 MAX_SEED = 2**32

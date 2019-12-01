@@ -299,8 +299,6 @@ class GlobalData(object) :#{{{
 
         # needs to be updated from the main code
         self.net = None
-
-        self.__epoch = 1
     #}}}
     def loss_function(self) :#{{{
         return self.__loss_function(**self.__loss_function_kw)
@@ -334,19 +332,15 @@ class GlobalData(object) :#{{{
         self.validation_loss.append(this_loss)
         self.validation_steps.append(len(self.training_loss))
     #}}}
-    def next_epoch(self) :#{{{
-        self.__epoch += 1
-        # perhaps some other code if desired
-    #}}}
     def pretraining(self) :#{{{
-        return self.__epoch <= self.__pretraining_epochs
+        return EPOCH <= self.__pretraining_epochs
     #}}}
     def target_as_model(self) :#{{{
-        return self.__epoch <= self.__pretraining_epochs/2
+        return EPOCH <= self.__pretraining_epochs/2
     #}}}
     def target_transformation(self, x) :#{{{
         __t = (
-            torch.tensor(self.__epoch, requires_grad = False).to(x.device, dtype = torch.float32)
+            torch.tensor(EPOCH, requires_grad = False).to(x.device, dtype = torch.float32)
             / torch.tensor(self.__tau, requires_grad = False).to(x.device, dtype = torch.float32)
             )
         return (
@@ -356,13 +350,6 @@ class GlobalData(object) :#{{{
             )
             - torch.expm1(- __t) / torch.tensor(self.__gamma, requires_grad = False).to(x.device, dtype = torch.float32) * x
             )
-    #}}}
-    def inv_target_transformation(self, y) :#{{{
-        # FIXME
-        __alpha = np.exp(-float(self.__epoch)/float(self.__tau))
-        __ybar = (y+(1.0-__alpha)/self.__kappa)/__alpha - np.log(__alpha*self.__kappa/(1.0-__alpha))
-        __xbar = wrightomega(__ybar)
-        return np.real(__alpha*self.__kappa*__xbar/(1.0-__alpha) - 1.0)
     #}}}
     def stop_training(self) :#{{{
         return (time()-START_TIME)/60./60. > ARGS.time
@@ -386,7 +373,7 @@ class GlobalData(object) :#{{{
                 'state_dict': self.net.state_dict(),
                 'configs': ARGS.final_config,
                 'consistency': {
-                    'epoch': self.__epoch,
+                    'epoch': EPOCH,
                     'box_sidelength': self.box_sidelength,
                     'DM_sidelength': self.DM_sidelength,
                     'gas_sidelength': self.gas_sidelength,
@@ -403,14 +390,14 @@ class GlobalData(object) :#{{{
         try :
             __state = torch.load(self.__output_path + name, map_location = {'cuda:0': 'cuda:0' if GPU_AVAIL else 'cpu', 'cpu': 'cpu'})
             self.net.load_state_dict(__state['state_dict'])
-            self.__epoch = __state['consistency']['epoch']
+            EPOCH = __state['consistency']['epoch']
             # Consistency checks
             assert self.box_sidelength == __state['consistency']['box_sidelength'], 'Box sidelength does not match.'
             assert self.DM_sidelength == __state['consistency']['DM_sidelength'], 'DM sidelength does not match.'
             assert self.gas_sidelength == __state['consistency']['gas_sidelength'], 'gas sidelength does not match.'
             assert ARGS.scaling == __state['consistency']['scaling'], 'scaling does not match.'
             if ARGS.verbose :
-                print 'Loaded network %s from disk,\n\tstarting at epoch %d.'%(name, self.__epoch)
+                print 'Loaded network %s from disk,\n\tstarting at epoch %d.'%(name, EPOCH)
         except IOError :
             if ARGS.verbose :
                 print 'Failed to load network %s from disk.\n Starting training with random initialization.'%name
@@ -1226,6 +1213,9 @@ if __name__ == '__main__' :
 
     # TRAINING
     if ARGS.mode == 'train' :#{{{
+        global EPOCH
+        EPOCH = 0
+
         GLOBDAT.net = Network(import_module(ARGS.network).this_network)
 
         if ARGS.verbose :
@@ -1325,12 +1315,12 @@ if __name__ == '__main__' :
                     if isinstance(lr_scheduler, _namesofplaces['ReduceLROnPlateau']) :
                         lr_scheduler.step(_loss)
                     elif isinstance(lr_scheduler, _namesofplaces['StepLR']) :
-                        lr_scheduler.step()
+                        lr_scheduler.step(epoch = EPOCH)
                     else :
                         raise NotImplementedError('Unknown learning rate scheduler, do not know how to call.')
 
                 GLOBDAT.save_loss('loss_%s.npz'%ARGS.output)
                 GLOBDAT.save_network('trained_network_%s.pt'%ARGS.output)
 
-                GLOBDAT.next_epoch()
+                EPOCH += 1
     #}}}

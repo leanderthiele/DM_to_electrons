@@ -895,6 +895,7 @@ class Network(nn.Module) :#{{{
                 x = self.__blocks[2*ii+1](x)
 
         else :
+            raise NotImplementedError('Currently this path is not up to date.')
             x = torch.cat(
                 (torch.zeros(
                     xmodel.size()[0],
@@ -1225,7 +1226,7 @@ if __name__ == '__main__' :
     # TRAINING
     if ARGS.mode == 'train' :#{{{
         global EPOCH
-        EPOCH = 0
+        EPOCH = 1
 
         GLOBDAT.net = Network(import_module(ARGS.network).this_network)
 

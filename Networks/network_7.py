@@ -16,6 +16,10 @@ this_network = {#{{{
                     'inplane': 32,
                     'outplane': 32,
                 },
+                {
+                    'inplane': 32,
+                    'outplane': 32,
+                },
     ],
 
     'Level_0': {

@@ -7,6 +7,17 @@ this_network = {#{{{
     'NLevels': 5,
     'feed_model': True,
 
+    'model_block': [
+                {
+                    'inplane': 1,
+                    'outplane': 32,
+                },
+                {
+                    'inplane': 32,
+                    'outplane': 32,
+                },
+    ],
+
     'Level_0': {
         'concat': False,
         'in': [
@@ -53,15 +64,15 @@ this_network = {#{{{
                 },
                 {
                     'inplane': 64,
-                    'outplane': 64,
+                    'outplane': 32,
                 },
                 {
-                    'inplane': 64,
-                    'outplane': 64,
+                    'inplane': 32,
+                    'outplane': 32,
                 },
                 {
-                    'inplane': 64,
-                    'outplane': 63, # remove one channel to make space for model
+                    'inplane': 32,
+                    'outplane': 32, # remove one channel to make space for model
                 },
         ],
     },

@@ -811,6 +811,15 @@ class Network(nn.Module) :#{{{
                 )
             )
 
+        if 'model_block' in self.network_dict :
+            if not self.network_dict['feed_model'] :
+                raise RuntimeError('You provided a model block but do not require model feed. Aborting.')
+            self.__model_block = Network.__feed_forward_block(
+                self.network_dict['model_block']
+                )
+        else :
+            self.__model_block = None
+
         self.is_frozen = False
     #}}}
     @staticmethod
@@ -876,10 +885,12 @@ class Network(nn.Module) :#{{{
                     if self.network_dict['Level_%d'%ii]['resize_to_gas'] :
                         intermediate_data[ii] = Network.__crop_tensor(
                             intermediate_data[ii],
-                            GLOBDAT.DM_sidelength - GLOBDAT.gas_sidelength
+                            intermediate_data[ii].shape[-1]/GLOBDAT.DM_sidelength * (GLOBDAT.DM_sidelength - GLOBDAT.gas_sidelength) # TODO CHECK
                             )
                     x = torch.cat((x, intermediate_data[ii]), dim = 1)
                 if ii == 0 and self.network_dict['feed_model'] :
+                    if self.__model_block is not None :
+                        xmodel = self.__model_block(xmodel)
                     x = torch.cat((x, xmodel), dim = 1)
                 x = self.__blocks[2*ii+1](x)
 

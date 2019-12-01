@@ -332,7 +332,7 @@ def draw_network(name) :#{{{
             level_states[ii] = amode.out_layer(level_states[ii])
             level_states[ii].xx = xx
             a = Arrow(l, Point(xx*HORI, ii*VERT), amode)
-            # check is non-default settings apply
+            # check if non-default settings apply
             layer_dict_flat = __flatten_dict(layer_dict)
             for key, value in layer_dict_flat.items() :
                 if key is 'inplane' or key is 'outplane' :
@@ -366,15 +366,47 @@ def draw_network(name) :#{{{
         else :
             level_states[ii] = level_states[ii+1]
         if ii == 0 and (this_network['feed_model'] if 'feed_model' in this_network else False) :
-            feed_state = LayerMode(1, DIM_OUT)
-            feed_layer = Layer(Point((xx-2)*HORI, -4*VERT), feed_state)
-            feed_layer.add_text(r'\textbf{Model}')
-            feed_layer.draw()
-            feed_layer.set_text()
+            if 'model_block' not in this_network :
+                feed_state = LayerMode(1, DIM_OUT)
+                feed_layer = Layer(Point((xx-2)*HORI, -4*VERT), feed_state)
+                feed_layer.add_text(r'\textbf{Model}')
+                feed_layer.draw()
+                feed_layer.set_text()
+            else :
+                feed_state = LayerMode(1, DIM_OUT)
+                feed_layer = Layer(Point((xx-2-len(this_network['model_block']))*HORI, -4*VERT), feed_state)
+                feed_layer.add_text(r'\textbf{Model}')
+                feed_layer.draw()
+                feed_layer.set_text()
+                for jj,layer_dict in enumerate(this_network['model_block']) :
+                    amode = ArrowMode(__merge(layer_dict, copy.deepcopy(__default_param)))
+                    feed_state = amode.out_layer(feed_state)
+                    feed_state.xx = xx-1-len(this_network['model_block'])+jj
+                    a_feed = Arrow(
+                        feed_layer,
+                        Point((xx-1-len(this_network['model_block'])+jj)*HORI, -4*VERT),
+                        amode
+                        )
+                    # check if non-default settings apply
+                    layer_dict_flat = __flatten_dict(layer_dict)
+                    for key, value in layer_dict_flat.items() :
+                        if key is 'inplane' or key is 'outplane' :
+                            continue
+                        if __default_param_flat[key] != value :
+                            a_feed.add_text(r'\texttt{%s:%s}'%(key, value))
+                    a_feed.draw()
+                    feed_layer = Layer(
+                        Point((xx-1-len(this_network['model_block'])+jj)*HORI, -4*VERT),
+                        feed_state
+                        )
+                    feed_layer.draw()
+
             amode_feed = ArrowMode({'conv': 'Copy'})
             a_feed = Arrow(feed_layer, Point(xx*HORI, ii*VERT), amode_feed)
             a_feed.draw()
             level_states[ii] = level_states[ii] + amode_feed.out_layer(feed_state)
+
+                
         l = Layer(Point(xx*HORI, ii*VERT), level_states[ii])
         l.draw()
         xx += 1

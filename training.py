@@ -978,7 +978,9 @@ class Analysis(object) :#{{{
         self.original_field_mesh.read_mesh()
     #}}}
     def predict_whole_volume(self) :#{{{
-        self.predicted_field = np.zeros(
+        # initialize prediction to -1 everywhere to check whether the whole volume
+        # really is filled.
+        self.predicted_field = (-1.0)*np.ones(
             (self.data.xlength+GLOBDAT.gas_sidelength, self.data.ylength+GLOBDAT.gas_sidelength, self.data.zlength+GLOBDAT.gas_sidelength),
             dtype = np.float32
             )

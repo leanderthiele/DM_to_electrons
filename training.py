@@ -24,6 +24,8 @@ import argparse
 """
 TODO
 !!! LOSS SEEMS PERIODIC -- WHAT'S GOING ON???
+
+-- fix lr scheduler with reloaded network -- use a state dict
 """
 
 MAX_SEED = 2**32
@@ -82,7 +84,7 @@ def _merge(source, destination):#{{{
 class _ArgParser(object) :#{{{
     def __init__(self) :#{{{
         _modes    = ['train', 'valid', ]
-        _scalings = ['log', 'linear', 'sqrt', 'cbrt', 'scaled', 'linear_filtered', 'linear_filtered_wbatt' ]
+        _scalings = ['default', 'default_smoothed', ]
 
         self.__parser = argparse.ArgumentParser(
             description='Code to train on DM only sims and hydro sims to \
@@ -133,25 +135,31 @@ class _ArgParser(object) :#{{{
             '-psfid', '--powerspectrumfid',
             nargs = '?',
             default = 'psfid',
-            help = 'File storing/to store fiducial powerspectrum.'
+            help = 'File to store fiducial powerspectrum.'
             )
         self.__parser.add_argument(
             '-pspred', '--powerspectrumpred',
             nargs = '?',
             default = 'pspred',
-            help = 'File storing/to store predicted powerspectrum.'
+            help = 'File to store predicted powerspectrum.'
             )
         self.__parser.add_argument(
             '-opfid', '--onepointfid',
             nargs = '?',
             default = 'opfid',
-            help = 'File storing/to store fiducial powerspectrum.'
+            help = 'File to store fiducial powerspectrum.'
             )
         self.__parser.add_argument(
             '-oppred', '--onepointpred',
             nargs = '?',
             default = 'oppred',
-            help = 'File storing/to store predicted powerspectrum.'
+            help = 'File to store predicted powerspectrum.'
+            )
+        self.__parser.add_argument(
+            '-fpred', '--fieldpred',
+            nargs = '?',
+            default = 'fieldpred',
+            help = 'File to store predicted gas field.'
             )
         self.__parser.add_argument(
             '-v', '--verbose',
@@ -290,26 +298,28 @@ class GlobalData(object) :#{{{
 
         # needs to be updated from the main code
         self.net = None
+        self.optimizer = None
+        self.lr_scheduler = None
     #}}}
-    def loss_function(self) :#{{{
+    def loss_function_(self) :#{{{
         return self.__loss_function(**self.__loss_function_kw)
     #}}}
-    def optimizer(self) :#{{{
+    def optimizer_(self) :#{{{
         return self.__optimizer(
             params = self.net.parameters(),
             **self.__optimizer_kw
             )
     #}}}
-    def lr_scheduler(self, optimizer) :#{{{
+    def lr_scheduler_(self) :#{{{
         if self.__lr_scheduler is not None :
             return self.__lr_scheduler(
-                optimizer,
+                self.optimizer,
                 **self.__lr_scheduler_kw
                 )
         else :
             return None
     #}}}
-    def data_loader(self, data) :#{{{
+    def data_loader_(self, data) :#{{{
         return DataLoader(
             data,
             **self.__data_loader_kw
@@ -321,7 +331,7 @@ class GlobalData(object) :#{{{
     #}}}
     def update_validation_loss(self, this_loss) :#{{{
         self.validation_loss.append(this_loss)
-        self.validation_steps.append(len(self.training_loss))
+        self.validation_steps.append(EPOCH)
     #}}}
     def pretraining(self) :#{{{
         return EPOCH <= self.__pretraining_epochs
@@ -361,7 +371,9 @@ class GlobalData(object) :#{{{
     def save_network(self, name) :#{{{
         if not ARGS.debug :
             __state = {
-                'state_dict': self.net.state_dict(),
+                'network_state_dict': self.net.state_dict(),
+                'optimizer_state_dict': self.optimizer.state_dict(),
+                'lr_scheduler_state_dict': self.lr_scheduler.state_dict() if self.lr_scheduler is not None else None,
                 'configs': ARGS.final_config,
                 'consistency': {
                     'epoch': EPOCH,
@@ -380,16 +392,35 @@ class GlobalData(object) :#{{{
         # need to initialize network first
         try :
             __state = torch.load(self.__output_path + name, map_location = {'cuda:0': 'cuda:0' if GPU_AVAIL else 'cpu', 'cpu': 'cpu'})
-            self.net.load_state_dict(__state['state_dict'])
+            self.net.load_state_dict(__state['network_state_dict'])
+            if self.optimizer is not None :
+                self.optimizer.load_state_dict(__state['optimizer_state_dict'])
+                if ARGS.verbose :
+                    print '\tLoaded optimizer state dict.'
+            if self.lr_scheduler is not None :
+                if __state['lr_scheduler_state_dict'] is not None :
+                    self.lr_scheduler.load_state_dict(__state['lr_scheduler_state_dict'])
+                    if ARGS.verbose :
+                        print '\tLoaded lr scheduler state dict.'
+                else :
+                    if ARGS.verbose :
+                        print '\tNo state dict for lr scheduler found in loaded network.'
+            else :
+                if __state['lr_scheduler_state_dict'] is not None :
+                    if ARGS.verbose :
+                        print '\tState dict for lr scheduler found but no lr scheduling requested in this run.'
             EPOCH = __state['consistency']['epoch']
             # Consistency checks
             assert self.box_sidelength == __state['consistency']['box_sidelength'], 'Box sidelength does not match.'
             assert self.DM_sidelength == __state['consistency']['DM_sidelength'], 'DM sidelength does not match.'
             assert self.gas_sidelength == __state['consistency']['gas_sidelength'], 'gas sidelength does not match.'
-            assert ARGS.scaling == __state['consistency']['scaling'], 'scaling does not match.'
+# TODO
+#            assert ARGS.scaling == __state['consistency']['scaling'], 'scaling does not match.'
             if ARGS.verbose :
                 print 'Loaded network %s from disk,\n\tstarting at epoch %d.'%(name, EPOCH)
         except IOError :
+            if ARGS.mode == 'valid' :
+                raise IOError('Trained network not found.')
             if ARGS.verbose :
                 print 'Failed to load network %s from disk.\n Starting training with random initialization.'%name
     #}}}
@@ -657,20 +688,20 @@ class InputData(Dataset) :#{{{
         assert gas_model.shape[0] == gas_model.shape[1] == gas_model.shape[2] == GLOBDAT.gas_sidelength, gas_model.shape
 
         # TODO why do we need to .copy() again?
-        if GLOBDAT.target_as_model() :
-            return (
-                torch.from_numpy(DM.copy()).unsqueeze(0),
-                torch.from_numpy(gas.copy()).unsqueeze(0),
-                torch.from_numpy(gas.copy()).unsqueeze(0),
-                torch.from_numpy(np.array([__xx, __yy, __zz], dtype=int)),
-                )
-        else :
-            return (
-                torch.from_numpy(DM.copy()).unsqueeze(0),
-                torch.from_numpy(gas.copy()).unsqueeze(0),
-                torch.from_numpy(gas_model.copy()).unsqueeze(0),
-                torch.from_numpy(np.array([__xx, __yy, __zz], dtype=int)),
-                )
+#        if GLOBDAT.target_as_model() :
+#            return (
+#                torch.from_numpy(DM.copy()).unsqueeze(0),
+#                torch.from_numpy(gas.copy()).unsqueeze(0),
+#                torch.from_numpy(gas.copy()).unsqueeze(0),
+#                torch.from_numpy(np.array([__xx, __yy, __zz], dtype=int)),
+#                )
+#        else :
+        return (
+            torch.from_numpy(DM.copy()).unsqueeze(0),
+            torch.from_numpy(gas.copy()).unsqueeze(0),
+            torch.from_numpy(gas_model.copy()).unsqueeze(0),
+            torch.from_numpy(np.array([__xx, __yy, __zz], dtype=int)),
+            )
         # add fake dimension (channel dimension is 0 here)
         """
         return (
@@ -856,7 +887,8 @@ class Network(nn.Module) :#{{{
     def forward(self, x, xmodel) :#{{{
 # TODO
 #        self.__update_mode()
-        if not GLOBDAT.pretraining() :
+#        if not GLOBDAT.pretraining() :
+        if True :
             intermediate_data = []
 
             # contracting path
@@ -950,7 +982,7 @@ class Analysis(object) :#{{{
             (self.data.xlength+GLOBDAT.gas_sidelength, self.data.ylength+GLOBDAT.gas_sidelength, self.data.zlength+GLOBDAT.gas_sidelength),
             dtype = np.float32
             )
-        loader = GLOBDAT.data_loader(self.data)
+        loader = GLOBDAT.data_loader_(self.data)
         for t, data in enumerate(loader) :
             with torch.no_grad() :
                 pred = GLOBDAT.net(
@@ -975,7 +1007,7 @@ class Analysis(object) :#{{{
                 'P': r.power['power'].real,
                 }
             np.savez(
-                '%s.npz'%ARGS.powerspectrumfid,
+                ARGS['summary_path']+'%s_%d.npz'%(ARGS.powerspectrumfid, ARGS['box_sidelength']),
                 k = self.original_power_spectrum['k'],
                 P = self.original_power_spectrum['P'],
                 )
@@ -988,7 +1020,7 @@ class Analysis(object) :#{{{
                 'P': r.power['power'].real,
                 }
             np.savez(
-                '%s_%s.npz'%(ARGS.powerspectrumpred, ARGS.output),
+                ARGS['summary_path']+'%s_%s_%d.npz'%(ARGS.powerspectrumpred, ARGS.output, ARGS['box_sidelength']),
                 k = self.predicted_power_spectrum['k'],
                 P = self.predicted_power_spectrum['P'],
                 )
@@ -1009,7 +1041,7 @@ class Analysis(object) :#{{{
             std_all  = np.std(self.original_field)
             mean_high = np.mean(self.original_field[self.original_field>std_all])
             np.savez(
-                '%s.npz'%ARGS.onepointfid,
+                ARGS['summary_path']+'%s_%d.npz'%(ARGS.onepointfid, ARGS['box_sidelength']),
                 h = h,
                 edges = edges,
                 mean_all = mean_all,
@@ -1029,7 +1061,7 @@ class Analysis(object) :#{{{
             std_all = np.std(self.predicted_field)
             mean_high = np.mean(self.predicted_field[self.predicted_field>std_all])
             np.savez(
-                '%s_%s.npz'%(ARGS.onepointpred, ARGS.output),
+                ARGS['summary_path']+'%s_%s_%d.npz'%(ARGS.onepointpred, ARGS.output, ARGS['box_sidelength']),
                 h = h,
                 edges = edges,
                 mean_all = mean_all,
@@ -1038,6 +1070,12 @@ class Analysis(object) :#{{{
                 )
             if ARGS.verbose :
                 print 'Computed predicted one-point PDF and saved to %s_%s.npz'%(ARGS.onepointpred, ARGS.output)
+    #}}}
+    def save_predicted_volume(self) :#{{{
+        np.save(
+            ARGS['summary_path']+'%s_%s_%d'%(ARGS.fieldpred, ARGS.output, ARGS.box_sidelength),
+            self.predicted_field
+            )
     #}}}
 #}}}
 
@@ -1079,7 +1117,7 @@ if __name__ == '__main__' :
         # VISUAL OUTPUT INSPECTION
         if False :#{{{
             with InputData('validation') as validation_set :
-                validation_loader = GLOBDAT.data_loader(validation_set)
+                validation_loader = GLOBDAT.data_loader_(validation_set)
 
                 NPAGES = 4
                 for t, data in enumerate(validation_loader) :
@@ -1184,15 +1222,11 @@ if __name__ == '__main__' :
 
                 a = Analysis(validation_set)
 
-#                a.read_original()
+                a.read_original()
 #                a.compute_powerspectrum('original')
 #                a.compute_onepoint('original')
                 a.predict_whole_volume()
-#                np.savez(
-#                    '/scratch/gpfs/lthiele/whole_volume.npz',
-#                    pred = a.predicted_field,
-#                    orig = a.original_field
-#                    )
+                a.save_predicted_volume()
                 a.compute_powerspectrum('predicted')
                 a.compute_onepoint('predicted')
 
@@ -1224,10 +1258,6 @@ if __name__ == '__main__' :
         if ARGS.verbose :
             print 'Putting network in parallel mode.'
         GLOBDAT.net = nn.DataParallel(GLOBDAT.net)
-        if not ARGS.ignoreexisting :
-            GLOBDAT.load_network('trained_network_%s.pt'%ARGS.output)
-
-        GLOBDAT.net.to(DEVICE)
 
         if ARGS.verbose and not GPU_AVAIL :
             print 'Summary of %s'%ARGS.network
@@ -1239,22 +1269,28 @@ if __name__ == '__main__' :
                 ]
                 )
 
-        loss_function_train = GLOBDAT.loss_function()
+        loss_function_train = GLOBDAT.loss_function_()
         loss_function_valid = nn.L1Loss()
-        optimizer = GLOBDAT.optimizer()
-        lr_scheduler = GLOBDAT.lr_scheduler(optimizer)
+        GLOBDAT.optimizer = GLOBDAT.optimizer_()
+        GLOBDAT.lr_scheduler = GLOBDAT.lr_scheduler_()
+
+        if not ARGS.ignoreexisting :
+            GLOBDAT.load_network('trained_network_%s.pt'%ARGS.output)
+
+        GLOBDAT.net.to(DEVICE)
+
 
 # TODO
 #        with InputData('training') as training_set, InputData('validation') as validation_set :
         with InputData('validation') as validation_set :
 
 # TODO
-#            training_loader = GLOBDAT.data_loader(training_set)
+#            training_loader = GLOBDAT.data_loader_(training_set)
 
             # keep the validation data always the same
             # (reduces noise in the output and makes diagnostics easier)
             validation_set.generate_rnd_indices()
-            validation_loader = GLOBDAT.data_loader(validation_set)
+            validation_loader = GLOBDAT.data_loader_(validation_set)
 
             while True : # train until time is up
 
@@ -1263,7 +1299,7 @@ if __name__ == '__main__' :
 
                 # TODO
                 with InputData('training') as training_set :
-                    training_loader = GLOBDAT.data_loader(training_set)
+                    training_loader = GLOBDAT.data_loader_(training_set)
                 # END TODO
 
                     for t, data_train in enumerate(training_loader) :
@@ -1318,7 +1354,7 @@ if __name__ == '__main__' :
                     if isinstance(lr_scheduler, _namesofplaces['ReduceLROnPlateau']) :
                         lr_scheduler.step(_loss)
                     elif isinstance(lr_scheduler, _namesofplaces['StepLR']) :
-                        lr_scheduler.step(epoch = EPOCH)
+                        lr_scheduler.step()
                     else :
                         raise NotImplementedError('Unknown learning rate scheduler, do not know how to call.')
 

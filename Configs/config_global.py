@@ -71,5 +71,5 @@ this_config = {
 
     'input_path' : '/tigress/lthiele/boxes/hdf5_files/',
     'output_path': '/scratch/gpfs/lthiele/Outputs/',
-    'summary_path':'/home/lthiele/DM_to_electrons/summaries/'
+    'summary_path':'/scratch/gpfs/lthiele/summaries/'
 }

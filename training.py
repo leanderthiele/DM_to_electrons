@@ -1225,8 +1225,8 @@ if __name__ == '__main__' :
                 a = Analysis(validation_set)
 
                 a.read_original()
-#                a.compute_powerspectrum('original')
-#                a.compute_onepoint('original')
+                a.compute_powerspectrum('original')
+                a.compute_onepoint('original')
                 a.predict_whole_volume()
                 a.save_predicted_volume()
                 a.compute_powerspectrum('predicted')
@@ -1306,7 +1306,7 @@ if __name__ == '__main__' :
 
                     for t, data_train in enumerate(training_loader) :
                         
-                        optimizer.zero_grad()
+                        GLOBDAT.optimizer.zero_grad()
                         __pred = GLOBDAT.net(
                             torch.autograd.Variable(data_train[0].to(DEVICE), requires_grad=False),
                             torch.autograd.Variable(data_train[2].to(DEVICE), requires_grad=False)
@@ -1327,7 +1327,7 @@ if __name__ == '__main__' :
 
                         GLOBDAT.update_training_loss(loss.item())
                         loss.backward()
-                        optimizer.step()
+                        GLOBDAT.optimizer.step()
                         
                         if GLOBDAT.stop_training() :
                             GLOBDAT.save_loss('loss_%s.npz'%ARGS.output)
@@ -1352,11 +1352,11 @@ if __name__ == '__main__' :
                     print 'validation loss : %.6e'%(_loss/(t_val+1.0))
                 GLOBDAT.update_validation_loss(_loss/(t_val+1.0))
 
-                if lr_scheduler is not None :
-                    if isinstance(lr_scheduler, _namesofplaces['ReduceLROnPlateau']) :
-                        lr_scheduler.step(_loss)
-                    elif isinstance(lr_scheduler, _namesofplaces['StepLR']) :
-                        lr_scheduler.step()
+                if GLOBDAT.lr_scheduler is not None :
+                    if isinstance(GLOBDAT.lr_scheduler, _namesofplaces['ReduceLROnPlateau']) :
+                        GLOBDAT.lr_scheduler.step(_loss)
+                    elif isinstance(GLOBDAT.lr_scheduler, _namesofplaces['StepLR']) :
+                        GLOBDAT.lr_scheduler.step()
                     else :
                         raise NotImplementedError('Unknown learning rate scheduler, do not know how to call.')
 

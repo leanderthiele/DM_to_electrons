@@ -1271,15 +1271,17 @@ if __name__ == '__main__' :
                 ]
                 )
 
+        GLOBDAT.net.to(DEVICE)
+
         loss_function_train = GLOBDAT.loss_function_()
         loss_function_valid = nn.L1Loss()
         GLOBDAT.optimizer = GLOBDAT.optimizer_()
         GLOBDAT.lr_scheduler = GLOBDAT.lr_scheduler_()
 
+        # TODO maybe do this first and store the dicts somewhere
         if not ARGS.ignoreexisting :
             GLOBDAT.load_network('trained_network_%s.pt'%ARGS.output)
 
-        GLOBDAT.net.to(DEVICE)
 
 
 # TODO

@@ -1009,7 +1009,7 @@ class Analysis(object) :#{{{
                 'P': r.power['power'].real,
                 }
             np.savez(
-                ARGS['summary_path']+'%s_%d.npz'%(ARGS.powerspectrumfid, ARGS['box_sidelength']),
+                ARGS['summary_path']+'%s_%s_%d.npz'%(ARGS.powerspectrumfid, ARGS.scaling, ARGS['box_sidelength']),
                 k = self.original_power_spectrum['k'],
                 P = self.original_power_spectrum['P'],
                 )
@@ -1043,7 +1043,7 @@ class Analysis(object) :#{{{
             std_all  = np.std(self.original_field)
             mean_high = np.mean(self.original_field[self.original_field>std_all])
             np.savez(
-                ARGS['summary_path']+'%s_%d.npz'%(ARGS.onepointfid, ARGS['box_sidelength']),
+                ARGS['summary_path']+'%s_%s_%d.npz'%(ARGS.onepointfid, ARGS.scaling, ARGS['box_sidelength']),
                 h = h,
                 edges = edges,
                 mean_all = mean_all,

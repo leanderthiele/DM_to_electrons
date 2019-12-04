@@ -433,9 +433,9 @@ class Stepper(object) :#{{{
         self.ylength = GLOBDAT.block_shapes[mode][1] - GLOBDAT.DM_sidelength
         self.zlength = GLOBDAT.block_shapes[mode][2] - GLOBDAT.DM_sidelength
 
-        self.max_x_index = self.__max_index(self.xlength)
-        self.max_y_index = self.__max_index(self.ylength)
-        self.max_z_index = self.__max_index(self.zlength)
+        self.max_x_index = self.__max_index(self.xlength+1)
+        self.max_y_index = self.__max_index(self.ylength+1)
+        self.max_z_index = self.__max_index(self.zlength+1)
     #}}}
     def __max_index(self, total_length) :#{{{
         if total_length%GLOBDAT.gas_sidelength == 0 : # gas sidelength fits perfectly
@@ -1075,7 +1075,7 @@ class Analysis(object) :#{{{
     #}}}
     def save_predicted_volume(self) :#{{{
         np.save(
-            ARGS['summary_path']+'%s_%s_%d'%(ARGS.fieldpred, ARGS.output, ARGS.box_sidelength),
+            ARGS['summary_path']+'%s_%s_%d'%(ARGS.fieldpred, ARGS.output, ARGS['box_sidelength']),
             self.predicted_field
             )
     #}}}
@@ -1228,9 +1228,9 @@ if __name__ == '__main__' :
                 a.compute_powerspectrum('original')
                 a.compute_onepoint('original')
                 a.predict_whole_volume()
-                a.save_predicted_volume()
                 a.compute_powerspectrum('predicted')
                 a.compute_onepoint('predicted')
+                a.save_predicted_volume()
 
                 if False :
                     plt.loglog(

@@ -576,13 +576,6 @@ class InputData(Dataset) :#{{{
         # sanity check
         assert self.stepper is None if self.position_selectors[0].is_biased() else True
 
-        # need these if we want to transform back
-        # TODO
-        #self.DM_training_mean    = self.files[0]['DM'].attrs['training_mean']
-        #self.DM_training_stddev  = self.files[0]['DM'].attrs['training_stddev']
-        #self.gas_training_mean   = self.files[0]['gas'].attrs['training_mean']
-        #self.gas_training_stddev = self.files[0]['gas'].attrs['training_stddev']
-        
         self.xx_indices_rnd = None
         self.yy_indices_rnd = None
         self.zz_indices_rnd = None
@@ -1278,11 +1271,8 @@ if __name__ == '__main__' :
         GLOBDAT.optimizer = GLOBDAT.optimizer_()
         GLOBDAT.lr_scheduler = GLOBDAT.lr_scheduler_()
 
-        # TODO maybe do this first and store the dicts somewhere
         if not ARGS.ignoreexisting :
             GLOBDAT.load_network('trained_network_%s.pt'%ARGS.output)
-
-
 
 # TODO
 #        with InputData('training') as training_set, InputData('validation') as validation_set :
@@ -1314,24 +1304,19 @@ if __name__ == '__main__' :
                             torch.autograd.Variable(data_train[2].to(DEVICE), requires_grad=False)
                             )
                         __targ = torch.autograd.Variable(data_train[1].to(DEVICE), requires_grad=False)
-                        # TODO
-#                        for ii in xrange(8) :
-#                            plt.matshow(GLOBDAT.target_transformation(__targ).cpu().numpy()[ii,0,8,:,:])
-#                            plt.show()
-                        # END TODO
                         loss = loss_function_train(
                             GLOBDAT.target_transformation(__pred),
                             GLOBDAT.target_transformation(__targ)
                             )
                         
-                        if ARGS.verbose and not GPU_AVAIL :
+                        if ARGS.verbose and (not GPU_AVAIL or ARGS.debug) :
                             print '\ttraining loss : %.3e'%loss.item()
 
                         GLOBDAT.update_training_loss(loss.item())
                         loss.backward()
                         GLOBDAT.optimizer.step()
                         
-                        if GLOBDAT.stop_training() :
+                        if GLOBDAT.stop_training() and not ARGS.debug :
                             GLOBDAT.save_loss('loss_%s.npz'%ARGS.output)
                             GLOBDAT.save_network('trained_network_%s.pt'%ARGS.output)
                             sys.exit(0)
@@ -1362,8 +1347,9 @@ if __name__ == '__main__' :
                     else :
                         raise NotImplementedError('Unknown learning rate scheduler, do not know how to call.')
 
-                GLOBDAT.save_loss('loss_%s.npz'%ARGS.output)
-                GLOBDAT.save_network('trained_network_%s.pt'%ARGS.output)
+                if not ARGS.debug :
+                    GLOBDAT.save_loss('loss_%s.npz'%ARGS.output)
+                    GLOBDAT.save_network('trained_network_%s.pt'%ARGS.output)
 
                 EPOCH += 1
     #}}}

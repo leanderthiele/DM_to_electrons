@@ -409,6 +409,8 @@ class GlobalData(object) :#{{{
                 if __state['lr_scheduler_state_dict'] is not None :
                     if ARGS.verbose :
                         print '\tState dict for lr scheduler found but no lr scheduling requested in this run.'
+
+            global EPOCH
             EPOCH = __state['consistency']['epoch']
             # Consistency checks
             assert self.box_sidelength == __state['consistency']['box_sidelength'], 'Box sidelength does not match.'

@@ -24,8 +24,6 @@ import argparse
 """
 TODO
 !!! LOSS SEEMS PERIODIC -- WHAT'S GOING ON???
-
--- fix lr scheduler with reloaded network -- use a state dict
 """
 
 MAX_SEED = 2**32
@@ -508,13 +506,18 @@ class PositionSelector(object) :#{{{
             __sorting_indices = np.argsort(self.log_mass)
             self.log_mass = self.log_mass[__sorting_indices]
             self.pos = self.pos[__sorting_indices, :]
-            # compute mass intervals
-            self.dlog_mass = np.diff(self.log_mass)
-            self.dlog_mass = np.concatenate((np.array([self.dlog_mass[0]]), self.dlog_mass))
-            # TODO construct this weight function
-            self.weights = np.ones(len(self.log_mass))
-            # END TODO
+            # compute mass intervals symmetrically
+            __dlog_mass_l = np.diff(self.log_mass)
+            __dlog_mass_r = -np.diff(self.log_mass[::-1])[::-1]
+            self.dlog_mass = 0.5 * (__dlog_mass_l[:-1] + __dlog_mass_r[1:])
+            self.dlog_mass = np.concatenate((__dlog_mass_r[:1], self.dlog_mass))
+            self.dlog_mass = np.concatenate((self.dlog_mass, __dlog_mass_l[-1:]))
+            self.weights = kwargs['halo_weight_fct'](self.log_mass, self.dlog_mass)
             self.weights /= np.sum(self.weights) # normalize probabilities
+            assert np.all(self.weights >= 0.0)
+            # TODO
+            plt.plot(self.log_mass, np.cumsum(self.weights), marker = 'o')
+            plt.show()
     #}}}
     def is_biased(self) :#{{{
         return self.empty_fraction < 1.0
@@ -1256,7 +1259,8 @@ if __name__ == '__main__' :
             print 'Putting network in parallel mode.'
         GLOBDAT.net = nn.DataParallel(GLOBDAT.net)
 
-        if ARGS.verbose and not GPU_AVAIL :
+#        if ARGS.verbose and not GPU_AVAIL :
+        if False :
             print 'Summary of %s'%ARGS.network
             summary(
                 GLOBDAT.net,

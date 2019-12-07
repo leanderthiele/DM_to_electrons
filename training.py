@@ -268,6 +268,7 @@ class GlobalData(object) :#{{{
         self.__tau   = ARGS['target_transformation_kw']['tau']
         self.__gamma = ARGS['target_transformation_kw']['gamma']
         self.__kappa = ARGS['target_transformation_kw']['kappa']
+        self.__delta = ARGS['target_transformation_kw']['delta']
 
         # where to find and put data files
         self.__input_path  = ARGS['input_path']
@@ -339,16 +340,16 @@ class GlobalData(object) :#{{{
     #}}}
     def target_transformation(self, x) :#{{{
         __t = (
-            torch.tensor(EPOCH, requires_grad = False).to(x.device, dtype = torch.float32)
+              torch.tensor(EPOCH,      requires_grad = False).to(x.device, dtype = torch.float32)
             / torch.tensor(self.__tau, requires_grad = False).to(x.device, dtype = torch.float32)
             )
-        return (
-            (
-                torch.exp(- __t) * torch.log1p(x) / torch.tensor(self.__gamma, requires_grad = False).to(x.device, dtype = torch.float32)
-                * torch.tensor(self.__kappa, requires_grad = False).to(x.device, dtype = torch.float32)
-            )
-            - torch.expm1(- __t) / torch.tensor(self.__gamma, requires_grad = False).to(x.device, dtype = torch.float32) * x
-            )
+        
+        __gamma = torch.tensor(self.__gamma, requires_grad = False).to(x.device, dtype = torch.float32)
+        __kappa = torch.tensor(self.__kappa, requires_grad = False).to(x.device, dtype = torch.float32)
+        __delta = torch.tensor(self.__delta, requires_grad = False).to(x.device, dtype = torch.float32)
+        
+        __alpha = __delta + (1.0 - __delta) * torch.exp(- __t)
+        return __kappa*__alpha*torch.log1p(x/__gamma) + (1.0-__alpha)*x
     #}}}
     def stop_training(self) :#{{{
         return (time()-START_TIME)/60./60. > ARGS.time
@@ -513,7 +514,7 @@ class PositionSelector(object) :#{{{
             self.dlog_mass = np.concatenate((__dlog_mass_r[:1], self.dlog_mass))
             self.dlog_mass = np.concatenate((self.dlog_mass, __dlog_mass_l[-1:]))
             self.weights = kwargs['halo_weight_fct'](self.log_mass, self.dlog_mass)
-            self.weights = np.broadcast_to(self.weights, self.log_mass.shape)
+            self.weights = np.broadcast_to(self.weights, self.log_mass.shape).copy()
             self.weights /= np.sum(self.weights) # normalize probabilities
             assert np.all(self.weights >= 0.0)
             # TODO

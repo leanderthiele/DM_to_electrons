@@ -37,23 +37,24 @@ this_config = {
     # sample selector
     'sample_selector_kw': {
                             'empty_fraction': 0.5,
-                            'halo_weight_fct': lambda logM, dlogM : logM,
+                            'halo_weight_fct': lambda logM, dlogM : 1.0,
                             'pos_mass_file': '/tigress/lthiele/Illustris_300-1_Dark/important_halos.hdf5',
                           },
 
     # when to switch to the full network (after only seeing the model)
-    'pretraining_epochs': 30,
+    'pretraining_epochs': 0,
 
     # target transformation
     'target_transformation': True,
     'target_transformation_kw': {
                                     # time constant for decay of the log term (in epochs)
-                                    # alpha = exp( - epoch / tau)
+                                    # alpha = delta + (1-delta) * exp( - epoch / tau)
                                     'tau': 300,
                                     # the transformation is given by
-                                    # f(x) = kappa * alpha * log(1 + x/gamma) + (1-alpha)*x
+                                    # f(x) = kappa * alpha * log(1 + x/gamma) + (1-alpha)*x/gamma
                                     'gamma': 0.1,
                                     'kappa': 1.0,
+                                    'delta': 0.0,
                                 },
 
     # describes individual epochs

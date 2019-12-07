@@ -513,6 +513,7 @@ class PositionSelector(object) :#{{{
             self.dlog_mass = np.concatenate((__dlog_mass_r[:1], self.dlog_mass))
             self.dlog_mass = np.concatenate((self.dlog_mass, __dlog_mass_l[-1:]))
             self.weights = kwargs['halo_weight_fct'](self.log_mass, self.dlog_mass)
+            self.weights = np.broadcast_to(self.weights, self.log_mass.shape)
             self.weights /= np.sum(self.weights) # normalize probabilities
             assert np.all(self.weights >= 0.0)
             # TODO

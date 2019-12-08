@@ -37,7 +37,7 @@ this_config = {
     # sample selector
     'sample_selector_kw': {
                             'empty_fraction': 0.5,
-                            'halo_weight_fct': lambda logM, dlogM : 1.0,
+                            'halo_weight_fct': 'lambda logM, dlogM : 1.0',
                             'pos_mass_file': '/tigress/lthiele/Illustris_300-1_Dark/important_halos.hdf5',
                           },
 

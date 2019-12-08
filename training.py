@@ -1,25 +1,33 @@
+# general utilities
 import copy
 import datetime
 from time import time, clock
 from os import system
 import sys
 from importlib import import_module
+import argparse
+
+# numerical libraries
 import numpy as np
-from scipy.special import wrightomega
 from nbodykit.lab import ArrayMesh, FFTPower
+
+# HDF5
 import h5py
+
+# multiprocessing (for parallel HDF5 reads)
 from mpi4py import MPI
+
+# pytorch
 import torch
 from torch import nn
 from torch.utils.data.dataset import Dataset
 from torch.utils.data import DataLoader, get_worker_info
 from torchsummary import summary
 
+# plotting
 from matplotlib import pyplot as plt
 from matplotlib import gridspec as gs
 from matplotlib.patches import Rectangle
-
-import argparse
 
 """
 TODO
@@ -140,6 +148,12 @@ class _ArgParser(object) :#{{{
             nargs = '?',
             default = 'pspred',
             help = 'File to store predicted powerspectrum.'
+            )
+        self.__parser.add_argument(
+            '-cross', '--crosspower',
+            nargs = '?',
+            default = 'cross',
+            help = 'File to store correlation coefficient r(k)'
             )
         self.__parser.add_argument(
             '-opfid', '--onepointfid',
@@ -513,13 +527,10 @@ class PositionSelector(object) :#{{{
             self.dlog_mass = 0.5 * (__dlog_mass_l[:-1] + __dlog_mass_r[1:])
             self.dlog_mass = np.concatenate((__dlog_mass_r[:1], self.dlog_mass))
             self.dlog_mass = np.concatenate((self.dlog_mass, __dlog_mass_l[-1:]))
-            self.weights = kwargs['halo_weight_fct'](self.log_mass, self.dlog_mass)
+            self.weights = eval(compile(kwargs['halo_weight_fct'], '<string>', 'eval'))(self.log_mass, self.dlog_mass)
             self.weights = np.broadcast_to(self.weights, self.log_mass.shape).copy()
             self.weights /= np.sum(self.weights) # normalize probabilities
             assert np.all(self.weights >= 0.0)
-            # TODO
-            plt.plot(self.log_mass, np.cumsum(self.weights), marker = 'o')
-            plt.show()
     #}}}
     def is_biased(self) :#{{{
         return self.empty_fraction < 1.0
@@ -757,6 +768,12 @@ class BasicLayer(nn.Module) :#{{{
             },
 
         'crop_output': False,
+
+        'dropout': False,
+        'dropout_kw': {
+            'p': 0.5,
+            'inplace': False,
+            },
         }
     #}}}
     @staticmethod
@@ -786,6 +803,13 @@ class BasicLayer(nn.Module) :#{{{
         else :
             self.__crop_fct = Identity()
 
+        if self.__merged_dict['dropout'] :
+            self.__dropout_fct = nn.Dropout3d(
+                **self.__merged_dict['dropout_kw']
+                )
+        else :
+            self.__dropout_fct = Identity()
+
         if self.__merged_dict['batch_norm'] is not None :
             self.__batch_norm_fct = _namesofplaces[self.__merged_dict['batch_norm']](
                 self.__merged_dict['outplane'],
@@ -802,7 +826,7 @@ class BasicLayer(nn.Module) :#{{{
             self.__activation_fct = Identity()
     #}}}
     def forward(self, x) :#{{{
-        x = self.__activation_fct(self.__batch_norm_fct(self.__crop_fct(self.__conv_fct(x))))
+        x = self.__activation_fct(self.__batch_norm_fct(self.__dropout_fct(self.__crop_fct(self.__conv_fct(x)))))
         return x
     #}}}
 #}}}
@@ -951,7 +975,12 @@ class Mesh(object) :#{{{
     def compute_powerspectrum(self) :#{{{
         if self.mesh is None :
             raise RuntimeError('You need to read the mesh to memory first.')
-        return FFTPower(self.mesh, mode='1d')
+        return FFTPower(self.mesh, mode = '1d')
+    #}}}
+    def cross_power(self, other) :#{{{
+        if self.mesh is None or other.mesh is None :
+            raise RuntimeError('One of the meshes you passed is not read to memory yet.')
+        return FFTPower(self.mesh, second = other.mesh, mode = '1d')
     #}}}
 #}}}
 
@@ -965,6 +994,7 @@ class Analysis(object) :#{{{
 
         self.original_power_spectrum = None
         self.predicted_power_spectrum = None
+        self.cross = None
     #}}}
     def read_original(self) :#{{{
         self.original_field = self.data.get_back['gas'](
@@ -1010,8 +1040,7 @@ class Analysis(object) :#{{{
                 }
             np.savez(
                 ARGS['summary_path']+'%s_%s_%d.npz'%(ARGS.powerspectrumfid, ARGS.scaling, ARGS['box_sidelength']),
-                k = self.original_power_spectrum['k'],
-                P = self.original_power_spectrum['P'],
+                **self.original_power_spectrum
                 )
             if ARGS.verbose :
                 print 'Computed original power spectrum and saved to %s.npz'%ARGS.powerspectrumfid
@@ -1023,13 +1052,26 @@ class Analysis(object) :#{{{
                 }
             np.savez(
                 ARGS['summary_path']+'%s_%s_%d.npz'%(ARGS.powerspectrumpred, ARGS.output, ARGS['box_sidelength']),
-                k = self.predicted_power_spectrum['k'],
-                P = self.predicted_power_spectrum['P'],
+                **self.predicted_power_spectrum
                 )
             if ARGS.verbose :
                 print 'Computed predicted power spectrum and saved to %s_%s.npz'%(ARGS.powerspectrumpred, ARGS.output)
         else :
             raise RuntimeError('Invalid mode in compute_powerspectrum, only original and predicted allowed.')
+    #}}}
+    def compute_correlation_coeff(self) :#{{{
+        r = self.original_field_mesh.cross_power(self.predicted_field_mesh)
+        assert np.allclose(cross.power['k'], self.original_power_spectrum['k'])
+        assert np.allclose(cross.power['k'], self.predicted_power_spectrum['k'])
+        self.cross = {
+            'k': r.power['k'],
+            'r': r.power['power'].real/np.sqrt(self.original_power_spectrum['P']*self.predicted_power_spectrum['P']),
+            }
+        np.savez(
+            ARGS['summary_path']+'%s_%s_%d.npz'%(ARGS.crosspower, ARGS.output, ARGS['box_sidelength']),
+            **self.cross
+            )
+
     #}}}
     def compute_onepoint(self, mode) :#{{{
         if mode is 'original' :
@@ -1230,6 +1272,7 @@ if __name__ == '__main__' :
                 a.predict_whole_volume()
                 a.compute_powerspectrum('predicted')
                 a.compute_onepoint('predicted')
+                a.compute_correlation_coeff()
                 a.save_predicted_volume()
 
                 if False :

@@ -697,8 +697,11 @@ class InputData(Dataset) :#{{{
             )
         if self.do_random_transformations :
             DM, gas, gas_model = self.__randomly_transform(DM, gas, gas_model, __ID)
-            if GLOBDAT.target_noise > 0.0 :
-                gas *= torch.normal(1.0, GLOBDAT.target_noise, size = gas.shape)
+        if GLOBDAT.target_noise > 0.0 and self.mode == 'training' :
+            # the first condition makes sure we don't have numerical problems
+            # the second condition makes sure that the validation loss is a true representation
+            #   (since the artificial noise is only meant to facilitate training)
+            gas *= self.rnd_generators[__ID].normal(1.0, GLOBDAT.target_noise, size = gas.shape)
         assert DM.shape[0]  == DM.shape[1]  == DM.shape[2]  == GLOBDAT.DM_sidelength,  DM.shape
         assert gas.shape[0] == gas.shape[1] == gas.shape[2] == GLOBDAT.gas_sidelength, gas.shape
         assert gas_model.shape[0] == gas_model.shape[1] == gas_model.shape[2] == GLOBDAT.gas_sidelength, gas_model.shape
@@ -942,7 +945,8 @@ class Network(nn.Module) :#{{{
                     x = torch.cat((x, intermediate_data[ii]), dim = 1)
                 if ii == 0 and self.network_dict['feed_model'] :
                     if self.__model_block is not None :
-                        xmodel = self.__model_block(xmodel)
+                        xmodel = torch.cat((xmodel, self.__model_block(xmodel)), dim = 1)
+                        # include a skip connection
                     x = torch.cat((x, xmodel), dim = 1)
                 x = self.__blocks[2*ii+1](x)
 

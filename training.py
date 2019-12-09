@@ -271,6 +271,9 @@ class GlobalData(object) :#{{{
         if self.__lr_scheduler is not None :
             self.__lr_scheduler_kw = ARGS['lr_scheduler_%s_kw'%ARGS['lr_scheduler']]
 
+        # random noise in target
+        self.target_noise = ARGS['target_noise']
+
         # sample selector
         self.sample_selector_kw = ARGS['sample_selector_kw']
 
@@ -694,6 +697,8 @@ class InputData(Dataset) :#{{{
             )
         if self.do_random_transformations :
             DM, gas, gas_model = self.__randomly_transform(DM, gas, gas_model, __ID)
+            if GLOBDAT.target_noise > 0.0 :
+                gas *= torch.normal(1.0, GLOBDAT.target_noise, size = gas.shape)
         assert DM.shape[0]  == DM.shape[1]  == DM.shape[2]  == GLOBDAT.DM_sidelength,  DM.shape
         assert gas.shape[0] == gas.shape[1] == gas.shape[2] == GLOBDAT.gas_sidelength, gas.shape
         assert gas_model.shape[0] == gas_model.shape[1] == gas_model.shape[2] == GLOBDAT.gas_sidelength, gas_model.shape
@@ -1061,8 +1066,8 @@ class Analysis(object) :#{{{
     #}}}
     def compute_correlation_coeff(self) :#{{{
         r = self.original_field_mesh.cross_power(self.predicted_field_mesh)
-        assert np.allclose(cross.power['k'], self.original_power_spectrum['k'])
-        assert np.allclose(cross.power['k'], self.predicted_power_spectrum['k'])
+        assert np.allclose(r.power['k'], self.original_power_spectrum['k'])
+        assert np.allclose(r.power['k'], self.predicted_power_spectrum['k'])
         self.cross = {
             'k': r.power['k'],
             'r': r.power['power'].real/np.sqrt(self.original_power_spectrum['P']*self.predicted_power_spectrum['P']),

@@ -34,6 +34,9 @@ this_config = {
                         'drop_last': True,
                       },
 
+    # artificial noise in target
+    'target_noise': 0.0,
+
     # sample selector
     'sample_selector_kw': {
                             'empty_fraction': 0.5,

@@ -272,7 +272,8 @@ class GlobalData(object) :#{{{
             self.__lr_scheduler_kw = ARGS['lr_scheduler_%s_kw'%ARGS['lr_scheduler']]
 
         # random noise in target
-        self.target_noise = ARGS['target_noise']
+        self.gas_noise = ARGS['gas_noise']
+        self.DM_noise = ARGS['DM_noise']
 
         # sample selector
         self.sample_selector_kw = ARGS['sample_selector_kw']
@@ -697,11 +698,14 @@ class InputData(Dataset) :#{{{
             )
         if self.do_random_transformations :
             DM, gas, gas_model = self.__randomly_transform(DM, gas, gas_model, __ID)
-        if GLOBDAT.target_noise > 0.0 and self.mode == 'training' :
+        if GLOBDAT.gas_noise > 0.0 and self.mode == 'training' :
             # the first condition makes sure we don't have numerical problems
             # the second condition makes sure that the validation loss is a true representation
             #   (since the artificial noise is only meant to facilitate training)
-            gas *= self.rnd_generators[__ID].normal(1.0, GLOBDAT.target_noise, size = gas.shape)
+            gas *= self.rnd_generators[__ID].normal(1.0, GLOBDAT.gas_noise, size = gas.shape)
+            gas_model *= self.rnd_generators[__ID].normal(1.0, GLOBDAT.gas_noise, size = gas_model.shape)
+        if GLOBDAT.DM_noise > 0.0 and self.mode == 'training' :
+            DM *= self.rnd_generators[__ID].normal(1.0, GLOBDAT.DM_noise, size = DM.shape)
         assert DM.shape[0]  == DM.shape[1]  == DM.shape[2]  == GLOBDAT.DM_sidelength,  DM.shape
         assert gas.shape[0] == gas.shape[1] == gas.shape[2] == GLOBDAT.gas_sidelength, gas.shape
         assert gas_model.shape[0] == gas_model.shape[1] == gas_model.shape[2] == GLOBDAT.gas_sidelength, gas_model.shape
@@ -1282,7 +1286,7 @@ if __name__ == '__main__' :
                 a.compute_powerspectrum('predicted')
                 a.compute_onepoint('predicted')
                 a.compute_correlation_coeff()
-                a.save_predicted_volume()
+#                a.save_predicted_volume()
 
                 if False :
                     plt.loglog(

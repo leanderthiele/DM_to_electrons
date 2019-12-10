@@ -35,7 +35,8 @@ this_config = {
                       },
 
     # artificial noise in target
-    'target_noise': 0.0,
+    'gas_noise': 0.0,
+    'DM_noise': 0.0,
 
     # sample selector
     'sample_selector_kw': {

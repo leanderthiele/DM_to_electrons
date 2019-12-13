@@ -10,6 +10,7 @@ import argparse
 # numerical libraries
 import numpy as np
 from nbodykit.lab import ArrayMesh, FFTPower
+from nbodykit.algorithms.fftpower import ProjectedFFTPower
 
 # HDF5
 import h5py
@@ -150,6 +151,18 @@ class _ArgParser(object) :#{{{
             help = 'File to store predicted powerspectrum.'
             )
         self.__parser.add_argument(
+            '-projpsfid', '--projpowerspectrumfid',
+            nargs = '?',
+            default = 'projpsfid',
+            help = 'File to store fiducial projected powerspectrum.'
+            )
+        self.__parser.add_argument(
+            '-projpspred', '--projpowerspectrumpred',
+            nargs = '?',
+            default = 'projpspred',
+            help = 'File to store predicted projected powerspectrum.'
+            )
+        self.__parser.add_argument(
             '-cross', '--crosspower',
             nargs = '?',
             default = 'cross',
@@ -284,6 +297,7 @@ class GlobalData(object) :#{{{
         # target transformation
         #   want the target transformation to happen on GPU, so push these there
         self.__tau   = ARGS['target_transformation_kw']['tau']
+        self.__epoch_max = ARGS['target_transformation_kw']['epoch_max']
         self.__gamma = ARGS['target_transformation_kw']['gamma']
         self.__kappa = ARGS['target_transformation_kw']['kappa']
         self.__delta = ARGS['target_transformation_kw']['delta']
@@ -358,7 +372,7 @@ class GlobalData(object) :#{{{
     #}}}
     def target_transformation(self, x) :#{{{
         __t = (
-              torch.tensor(EPOCH,      requires_grad = False).to(x.device, dtype = torch.float32)
+              torch.tensor(min(EPOCH, self.__epoch_max), requires_grad = False).to(x.device, dtype = torch.float32)
             / torch.tensor(self.__tau, requires_grad = False).to(x.device, dtype = torch.float32)
             )
         
@@ -985,10 +999,18 @@ class Mesh(object) :#{{{
                 BoxSize=(GLOBDAT.box_size/float(GLOBDAT.box_sidelength))*np.array(self.arr.shape)
                 )
     #}}}
-    def compute_powerspectrum(self) :#{{{
+    def compute_powerspectrum(self, axis = None) :#{{{
         if self.mesh is None :
             raise RuntimeError('You need to read the mesh to memory first.')
-        return FFTPower(self.mesh, mode = '1d')
+        if axis is None :
+            return FFTPower(self.mesh, mode = '1d')
+        else :
+            assert isinstance(axis, int)
+            assert 0 <= axis < 3
+            axes = [0, 1, 2]
+            axes.remove(axis)
+            axes = tuple(axes)
+            return ProjectedFFTPower(self.mesh, axes = axes)
     #}}}
     def cross_power(self, other) :#{{{
         if self.mesh is None or other.mesh is None :
@@ -1007,7 +1029,24 @@ class Analysis(object) :#{{{
 
         self.original_power_spectrum = None
         self.predicted_power_spectrum = None
+        self.original_projpower_spectrum = None
+        self.predicted_projpower_spectrum = None
         self.cross = None
+
+        self.mean_all_original = None
+        self.mean_all_predicted = None
+    #}}}
+    @staticmethod
+    def apodize(arr) :#{{{
+        __L = 100
+        __ramp = np.linspace(0., 1., num = __L)
+        arr[:+__L,:,:] *= __ramp[::+1,None,None]
+        arr[-__L:,:,:] *= __ramp[::-1,None,None]
+        arr[:,:+__L,:] *= __ramp[None,::+1,None]
+        arr[:,-__L:,:] *= __ramp[None,::-1,None]
+        arr[:,:,:+__L] *= __ramp[None,None,::+1]
+        arr[:,:,-__L:] *= __ramp[None,None,::-1]
+        return arr
     #}}}
     def read_original(self) :#{{{
         self.original_field = self.data.get_back['gas'](
@@ -1017,9 +1056,10 @@ class Analysis(object) :#{{{
                 (GLOBDAT.DM_sidelength-GLOBDAT.gas_sidelength)/2 : self.data.zlength+(GLOBDAT.DM_sidelength+GLOBDAT.gas_sidelength)/2,
                 ]
             )
+#        self.original_field_mesh = Mesh(Analysis.apodize(self.original_field))
         self.original_field_mesh = Mesh(self.original_field)
         self.original_field_mesh.read_mesh()
-    #}}}
+    #}}}predicted_projpower_spectrum
     def predict_whole_volume(self) :#{{{
         # initialize prediction to -1 everywhere to check whether the whole volume
         # really is filled.
@@ -1041,6 +1081,15 @@ class Analysis(object) :#{{{
                     __coords[ii,1] : __coords[ii,1] + GLOBDAT.gas_sidelength,
                     __coords[ii,2] : __coords[ii,2] + GLOBDAT.gas_sidelength
                     ] = self.data.get_back['gas'](pred[ii,...])
+#        self.predicted_field_mesh = Mesh(Analysis.apodize(self.predicted_field))
+
+        # TODO
+        # match the mean value -- that's a hack at the moment
+        __old_mean = np.mean(self.predicted_field)
+        __patching = (self.mean_all_original - __old_mean) * float(self.predicted_field.size)/float(self.predicted_field.size - np.count_nonzero(self.predicted_field))
+        self.predicted_field[self.predicted_field == 0.0] = __patching
+        # END TODO
+
         self.predicted_field_mesh = Mesh(self.predicted_field)
         self.predicted_field_mesh.read_mesh()
     #}}}
@@ -1072,6 +1121,34 @@ class Analysis(object) :#{{{
         else :
             raise RuntimeError('Invalid mode in compute_powerspectrum, only original and predicted allowed.')
     #}}}
+    def compute_projected_powerspectrum(self, mode) :#{{{
+        if mode is 'original' :
+            r = self.original_field_mesh.compute_powerspectrum(2)
+            self.original_projpower_spectrum = {
+                'k': r.power['k'],
+                'P': r.power['power'].real,
+                }
+            np.savez(
+                ARGS['summary_path']+'%s_%s_%d.npz'%(ARGS.projpowerspectrumfid, ARGS.scaling, ARGS['box_sidelength']),
+                **self.original_projpower_spectrum
+                )
+            if ARGS.verbose :
+                print 'Computed original projected power spectrum and saved to %s_%s_%d.npz'%(ARGS.projpowerspectrumfid, ARGS.scaling, ARGS['box_sidelength'])
+        elif mode is 'predicted' :
+            r = self.predicted_field_mesh.compute_powerspectrum(2)
+            self.predicted_projpower_spectrum = {
+                'k': r.power['k'],
+                'P': r.power['power'].real,
+                }
+            np.savez(
+                ARGS['summary_path']+'%s_%s_%d.npz'%(ARGS.projpowerspectrumpred, ARGS.output, ARGS['box_sidelength']),
+                **self.predicted_projpower_spectrum
+                )
+            if ARGS.verbose :
+                print 'Computed predicted projected power spectrum and saved to %s_%s_%d.npz'%(ARGS.projpowerspectrumpred, ARGS.output, ARGS['box_sidelength'])
+        else :
+            raise RuntimeError('Invalid mode in compute_powerspectrum, only original and predicted allowed.')
+    #}}}
     def compute_correlation_coeff(self) :#{{{
         r = self.original_field_mesh.cross_power(self.predicted_field_mesh)
         assert np.allclose(r.power['k'], self.original_power_spectrum['k'])
@@ -1084,6 +1161,8 @@ class Analysis(object) :#{{{
             ARGS['summary_path']+'%s_%s_%d.npz'%(ARGS.crosspower, ARGS.output, ARGS['box_sidelength']),
             **self.cross
             )
+        if ARGS.verbose :
+            print 'Computed correlation coefficient and saved to %s_%s_%d.npz'%(ARGS.crosspower, ARGS.output, ARGS['box_sidelength'])
 
     #}}}
     def compute_onepoint(self, mode) :#{{{
@@ -1094,14 +1173,14 @@ class Analysis(object) :#{{{
                 density = False,
                 )
             h = h.astype(float)/float(self.original_field.size)
-            mean_all = np.mean(self.original_field)
+            self.mean_all_original = np.mean(self.original_field)
             std_all  = np.std(self.original_field)
             mean_high = np.mean(self.original_field[self.original_field>std_all])
             np.savez(
                 ARGS['summary_path']+'%s_%s_%d.npz'%(ARGS.onepointfid, ARGS.scaling, ARGS['box_sidelength']),
                 h = h,
                 edges = edges,
-                mean_all = mean_all,
+                mean_all = self.mean_all_original,
                 std_all = std_all,
                 mean_high = mean_high,
                 )
@@ -1114,14 +1193,14 @@ class Analysis(object) :#{{{
                 density = False,
                 )
             h = h.astype(float)/float(self.predicted_field.size)
-            mean_all = np.mean(self.predicted_field)
+            self.mean_all_predicted = np.mean(self.predicted_field)
             std_all = np.std(self.predicted_field)
             mean_high = np.mean(self.predicted_field[self.predicted_field>std_all])
             np.savez(
                 ARGS['summary_path']+'%s_%s_%d.npz'%(ARGS.onepointpred, ARGS.output, ARGS['box_sidelength']),
                 h = h,
                 edges = edges,
-                mean_all = mean_all,
+                mean_all = self.mean_all_predicted,
                 std_all = std_all,
                 mean_high = mean_high,
                 )
@@ -1281,12 +1360,14 @@ if __name__ == '__main__' :
 
                 a.read_original()
                 a.compute_powerspectrum('original')
+                a.compute_projected_powerspectrum('original')
                 a.compute_onepoint('original')
                 a.predict_whole_volume()
                 a.compute_powerspectrum('predicted')
+                a.compute_projected_powerspectrum('predicted')
                 a.compute_onepoint('predicted')
                 a.compute_correlation_coeff()
-#                a.save_predicted_volume()
+                a.save_predicted_volume()
 
                 if False :
                     plt.loglog(

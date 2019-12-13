@@ -40,7 +40,7 @@ this_config = {
 
     # sample selector
     'sample_selector_kw': {
-                            'empty_fraction': 0.5,
+                            'empty_fraction': 0.0,
                             'halo_weight_fct': 'lambda logM, dlogM : 1.0',
                             'pos_mass_file': '/tigress/lthiele/Illustris_300-1_Dark/important_halos.hdf5',
                           },
@@ -54,6 +54,7 @@ this_config = {
                                     # time constant for decay of the log term (in epochs)
                                     # alpha = delta + (1-delta) * exp( - epoch / tau)
                                     'tau': 300,
+                                    'epoch_max': 1000, # no change after this epoch
                                     # the transformation is given by
                                     # f(x) = kappa * alpha * log(1 + x/gamma) + (1-alpha)*x/gamma
                                     'gamma': 0.1,

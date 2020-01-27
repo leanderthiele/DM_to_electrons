@@ -1083,13 +1083,6 @@ class Analysis(object) :#{{{
                     ] = self.data.get_back['gas'](pred[ii,...])
 #        self.predicted_field_mesh = Mesh(Analysis.apodize(self.predicted_field))
 
-        # TODO
-        # match the mean value -- that's a hack at the moment
-        __old_mean = np.mean(self.predicted_field)
-        __patching = (self.mean_all_original - __old_mean) * float(self.predicted_field.size)/float(self.predicted_field.size - np.count_nonzero(self.predicted_field))
-        self.predicted_field[self.predicted_field == 0.0] = __patching
-        # END TODO
-
         self.predicted_field_mesh = Mesh(self.predicted_field)
         self.predicted_field_mesh.read_mesh()
     #}}}
@@ -1367,7 +1360,7 @@ if __name__ == '__main__' :
                 a.compute_projected_powerspectrum('predicted')
                 a.compute_onepoint('predicted')
                 a.compute_correlation_coeff()
-                a.save_predicted_volume()
+                #a.save_predicted_volume()
 
                 if False :
                     plt.loglog(
@@ -1412,7 +1405,7 @@ if __name__ == '__main__' :
         GLOBDAT.net.to(DEVICE)
 
         loss_function_train = GLOBDAT.loss_function_()
-        loss_function_valid = nn.L1Loss()
+        loss_function_valid = GLOBDAT.loss_function_()
         GLOBDAT.optimizer = GLOBDAT.optimizer_()
         GLOBDAT.lr_scheduler = GLOBDAT.lr_scheduler_()
 

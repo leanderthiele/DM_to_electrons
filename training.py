@@ -199,7 +199,12 @@ class _ArgParser(object) :#{{{
         self.__parser.add_argument(
             '-d', '--debug',
             action = 'store_true',
-            help = 'For short debugging runs.'
+            help = 'For short debugging runs.',
+            )
+        self.__parser.add_argument(
+            '-sb', '--savebest',
+            action = 'store_true',
+            help = 'Do you want to save the network with the best validation loss?',
             )
         self.__parser.add_argument(
             '--ignoreexisting',
@@ -399,22 +404,23 @@ class GlobalData(object) :#{{{
             if ARGS.verbose :
                 print 'Not saving loss since in debugging mode.'
     #}}}
-    def save_network(self, name) :#{{{
+    def save_network(self, name, best = False) :#{{{
         if not ARGS.debug :
-            __state = {
-                'network_state_dict': self.net.state_dict(),
-                'optimizer_state_dict': self.optimizer.state_dict(),
-                'lr_scheduler_state_dict': self.lr_scheduler.state_dict() if self.lr_scheduler is not None else None,
-                'configs': ARGS.final_config,
-                'consistency': {
-                    'epoch': EPOCH,
-                    'box_sidelength': self.box_sidelength,
-                    'DM_sidelength': self.DM_sidelength,
-                    'gas_sidelength': self.gas_sidelength,
-                    'scaling': ARGS.scaling,
-                    },
-                }
-            torch.save(__state, self.__output_path + name)
+            if (not best) or (self.validation_loss[-1] < np.min(np.array(self.validation_loss)[:-1]) if len(self.validation_loss) > 1 else False) :
+                __state = {
+                    'network_state_dict': self.net.state_dict(),
+                    'optimizer_state_dict': self.optimizer.state_dict(),
+                    'lr_scheduler_state_dict': self.lr_scheduler.state_dict() if self.lr_scheduler is not None else None,
+                    'configs': ARGS.final_config,
+                    'consistency': {
+                        'epoch': EPOCH,
+                        'box_sidelength': self.box_sidelength,
+                        'DM_sidelength': self.DM_sidelength,
+                        'gas_sidelength': self.gas_sidelength,
+                        'scaling': ARGS.scaling,
+                        },
+                    }
+                torch.save(__state, self.__output_path + name)
         else :
             if ARGS.verbose :
                 print 'Not saving network since in debugging mode.'
@@ -1456,7 +1462,10 @@ if __name__ == '__main__' :
                         
                         if GLOBDAT.stop_training() and not ARGS.debug :
                             GLOBDAT.save_loss('loss_%s.npz'%ARGS.output)
-                            GLOBDAT.save_network('trained_network_%s.pt'%ARGS.output)
+                            if ARGS.savebest :
+                                GLOBDAT.save_network('trained_network_%s_end.pt'%ARGS.output, False)
+                            else :
+                                GLOBDAT.save_network('trained_network_%s.pt'%ARGS.output, False)
                             sys.exit(0)
                     # end loop over one epoch
 
@@ -1487,7 +1496,7 @@ if __name__ == '__main__' :
 
                 if not ARGS.debug :
                     GLOBDAT.save_loss('loss_%s.npz'%ARGS.output)
-                    GLOBDAT.save_network('trained_network_%s.pt'%ARGS.output)
+                    GLOBDAT.save_network('trained_network_%s.pt'%ARGS.output, ARGS.savebest)
 
                 EPOCH += 1
     #}}}

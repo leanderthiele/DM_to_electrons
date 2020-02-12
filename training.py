@@ -308,9 +308,7 @@ class GlobalData(object) :#{{{
         self.individual_boxes_max_index = ARGS['individual_boxes_max_index']
 
         # some sanity tests
-        assert self.sample_selector_kw['empty_fraction'] >= 0.0
-        assert self.individual_boxes_fraction >= 0.0
-        assert self.sample_selector_kw['empty_fraction'] + self.individual_boxes_fraction <= 1.0
+        assert 0.0 <= self.individual_boxes_fraction <= 1.0
 
         # pretraining
         self.__pretraining_epochs = ARGS['pretraining_epochs']
@@ -554,6 +552,7 @@ class PositionSelector(object) :#{{{
         self.zlength = GLOBDAT.block_shapes[self.mode][2] - GLOBDAT.DM_sidelength
 
         self.empty_fraction = kwargs['empty_fraction'] if 'empty_fraction' in kwargs else 1.0
+        assert 0.0 <= self.empty_fraction <= 1.0
         if self.mode == 'training' :
             self.rnd_generator = np.random.RandomState((hash(str(clock()+seed))+hash(self.mode))%MAX_SEED)
         elif self.mode == 'validation' :
@@ -749,10 +748,10 @@ class InputData(Dataset) :#{{{
     def get_from_individual_box(self, __ID) :#{{{
         # TODO there's a lot of code duplication with the previous function,
         #      can maybe simplify this ?
-        indx = self.rnd_generators[__ID].uniform(0, self.individual_boxes_Nfiles)
-        xx = self.rnd_generators[__ID].uniform(0, GLOBDAT.individual_boxes_size - GLOBDAT.DM_sidelength)
-        yy = self.rnd_generators[__ID].uniform(0, GLOBDAT.individual_boxes_size - GLOBDAT.DM_sidelength)
-        zz = self.rnd_generators[__ID].uniform(0, GLOBDAT.individual_boxes_size - GLOBDAT.DM_sidelength)
+        indx = self.rnd_generators[__ID].randint(0, self.individual_boxes_Nfiles)
+        xx = self.rnd_generators[__ID].randint(0, GLOBDAT.individual_boxes_size - GLOBDAT.DM_sidelength)
+        yy = self.rnd_generators[__ID].randint(0, GLOBDAT.individual_boxes_size - GLOBDAT.DM_sidelength)
+        zz = self.rnd_generators[__ID].randint(0, GLOBDAT.individual_boxes_size - GLOBDAT.DM_sidelength)
         DM = self.individual_box_datasets['DM'][__ID + indx * max(GLOBDAT.num_workers, 1)][
             xx : xx+GLOBDAT.DM_sidelength,
             yy : yy+GLOBDAT.DM_sidelength,

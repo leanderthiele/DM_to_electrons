@@ -841,6 +841,8 @@ class InputData(Dataset) :#{{{
     def __exit__(self, exc_type, exc_value, exc_traceback) :#{{{
         for f in self.files :
             f.close()
+        for f in self.individual_box_files :
+            f.close()
     #}}}
 #}}}
 

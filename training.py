@@ -3,6 +3,7 @@ import copy
 import datetime
 from time import time, clock
 from os import system
+from os.path import isfile
 import sys
 from importlib import import_module
 import argparse
@@ -197,6 +198,11 @@ class _ArgParser(object) :#{{{
             help = 'If several GPUs are available.',
             )
         self.__parser.add_argument(
+            '--nocopy',
+            action = 'store_false',
+            help = 'Do not copy the data to the local GPU node disk.',
+            )
+        self.__parser.add_argument(
             '-d', '--debug',
             action = 'store_true',
             help = 'For short debugging runs.',
@@ -296,6 +302,16 @@ class GlobalData(object) :#{{{
         # sample selector
         self.sample_selector_kw = ARGS['sample_selector_kw']
 
+        # individual boxes
+        self.individual_boxes_fraction  = ARGS['individual_boxes_fraction']
+        self.individual_boxes_size      = ARGS['individual_boxes_size']
+        self.individual_boxes_max_index = ARGS['individual_boxes_max_index']
+
+        # some sanity tests
+        assert self.sample_selector_kw['empty_fraction'] >= 0.0
+        assert self.individual_boxes_fraction >= 0.0
+        assert self.sample_selector_kw['empty_fraction'] + self.individual_boxes_fraction <= 1.0
+
         # pretraining
         self.__pretraining_epochs = ARGS['pretraining_epochs']
 
@@ -309,15 +325,31 @@ class GlobalData(object) :#{{{
 
         # where to find and put data files
         self.__input_path  = ARGS['input_path']
+        self.__individual_boxes_path = ARGS['individual_boxes_path']
         self.__output_path = ARGS['output_path']
 
-        if GPU_AVAIL and not ARGS.debug :
+        if GPU_AVAIL and not ARGS.debug and not ARGS.nocopy :
             print 'Starting to copy data to /tmp'
             system('cp %s%s/size_%d.hdf5 /tmp/'%(self.__input_path, ARGS.scaling, self.box_sidelength))
-            print 'Finished copying data to /tmp, took %.2e seconds'%(time()-START_TIME) # 4.06e+02 sec for 2048, ~12 sec for 1024
             self.data_path = '/tmp/size_%d.hdf5'%self.box_sidelength
+
+            if self.individual_boxes_fraction > 0.0 :
+                print 'Starting to copy individual boxes to /tmp'
+                system('mkdir /tmp/individual_boxes')
+                system('cp %s%s/size_%d/* /tmp/individual_boxes'%(self.__individual_boxes_path, ARGS.scaling, self.box_sidelength))
+                self.individual_boxes_path = '/tmp/individual_boxes/'
+            else :
+                self.individual_boxes_path = None
+
+            print 'Finished copying data to /tmp, took %.2e seconds'%(time()-START_TIME) # 4.06e+02 sec for 2048, ~12 sec for 1024
         else :
             self.data_path = '%s%s/size_%d.hdf5'%(self.__input_path, ARGS.scaling, self.box_sidelength)
+            
+            if self.individual_boxes_fraction > 0.0 :
+                self.individual_boxes_path = '%s%s/size_%d/'%(self.__individual_boxes_path, ARGS.scaling, self.box_sidelength)
+            else :
+                self.individual_boxes_path = None
+
 
         # Some hardcoded values
         self.block_shapes = {'training':   (self.box_sidelength, self.box_sidelength           , (1428*self.box_sidelength)/2048),
@@ -526,7 +558,6 @@ class PositionSelector(object) :#{{{
             self.rnd_generator = np.random.RandomState((hash(str(clock()+seed))+hash(self.mode))%MAX_SEED)
         elif self.mode == 'validation' :
             self.rnd_generator = np.random.RandomState(seed)
-        assert 0.0 <= self.empty_fraction <= 1.0
         if self.empty_fraction < 1.0 :
             if ARGS.verbose :
                 print 'In PositionSelector(%s) : Reading %s.'%(self.mode, kwargs['pos_mass_file'])
@@ -591,9 +622,13 @@ class InputData(Dataset) :#{{{
         self.zlength = GLOBDAT.block_shapes[mode][2] - GLOBDAT.DM_sidelength
 
         self.files = []
+        self.individual_box_files = []
         self.datasets = {}
+        self.individual_box_datasets = {}
+        self.individual_boxes_Nfiles = 0
         for t in __types :
             self.datasets[t] = []
+            self.individual_box_datasets[t] = []
         self.position_selectors = []
         self.rnd_generators = []
         for ii in xrange(max(GLOBDAT.num_workers, 1)) :
@@ -607,6 +642,17 @@ class InputData(Dataset) :#{{{
                 self.rnd_generators.append(np.random.RandomState((hash(str(clock()+ii))+hash(self.mode))%MAX_SEED))
             elif self.mode == 'validation' :
                 self.rnd_generators.append(np.random.RandomState(ii)) # use always the same seed for validation set (easier comparison)
+        
+        if GLOBDAT.individual_boxes_fraction > 0.0 :
+            for jj in xrange(GLOBDAT.individual_boxes_max_index + 1) :
+                if isfile('%sh%d.hdf5'%(GLOBDAT.individual_boxes_path, jj)) :
+                    self.individual_boxes_Nfiles += 1
+                    for ii in xrange(max(GLOBDAT.num_workers, 1)) :
+                        self.individual_box_files.append(h5py.File('%sh%d.hdf5'%(GLOBDAT.individual_boxes_path, jj)),
+                                                         'r', driver='mpio', comm=MPI.COMM_WORLD)
+                        for t in __types :
+                            self.individual_box_datasets[t].append(self.individual_box_files[-1][t])
+            assert self.individual_boxes_Nfiles > 0, 'No individual boxes found.'
 
         # read the backward transformations
         self.get_back = {}
@@ -700,22 +746,52 @@ class InputData(Dataset) :#{{{
             ]
         return DM, gas, gas_model
     #}}}
+    def get_from_individual_box(self, __ID) :#{{{
+        # TODO there's a lot of code duplication with the previous function,
+        #      can maybe simplify this ?
+        indx = self.rnd_generators[__ID].uniform(0, self.individual_boxes_Nfiles)
+        xx = self.rnd_generators[__ID].uniform(0, GLOBDAT.individual_boxes_size - GLOBDAT.DM_sidelength)
+        yy = self.rnd_generators[__ID].uniform(0, GLOBDAT.individual_boxes_size - GLOBDAT.DM_sidelength)
+        zz = self.rnd_generators[__ID].uniform(0, GLOBDAT.individual_boxes_size - GLOBDAT.DM_sidelength)
+        DM = self.individual_box_datasets['DM'][__ID + indx * max(GLOBDAT.num_workers, 1)][
+            xx : xx+GLOBDAT.DM_sidelength,
+            yy : yy+GLOBDAT.DM_sidelength,
+            zz : zz+GLOBDAT.DM_sidelength
+            ]
+        gas = self.individual_box_datasets['gas'][__ID + indx * max(GLOBDAT.num_workers, 1)][
+            xx+(GLOBDAT.DM_sidelength-GLOBDAT.gas_sidelength)/2 : xx+(GLOBDAT.DM_sidelength+GLOBDAT.gas_sidelength)/2,
+            yy+(GLOBDAT.DM_sidelength-GLOBDAT.gas_sidelength)/2 : yy+(GLOBDAT.DM_sidelength+GLOBDAT.gas_sidelength)/2,
+            zz+(GLOBDAT.DM_sidelength-GLOBDAT.gas_sidelength)/2 : zz+(GLOBDAT.DM_sidelength+GLOBDAT.gas_sidelength)/2,
+            ]
+        gas_model = self.individual_box_datasets['gas_model'][__ID + indx * max(GLOBDAT.num_workers, 1)][
+            xx+(GLOBDAT.DM_sidelength-GLOBDAT.gas_sidelength)/2 : xx+(GLOBDAT.DM_sidelength+GLOBDAT.gas_sidelength)/2,
+            yy+(GLOBDAT.DM_sidelength-GLOBDAT.gas_sidelength)/2 : yy+(GLOBDAT.DM_sidelength+GLOBDAT.gas_sidelength)/2,
+            zz+(GLOBDAT.DM_sidelength-GLOBDAT.gas_sidelength)/2 : zz+(GLOBDAT.DM_sidelength+GLOBDAT.gas_sidelength)/2,
+            ]
+        return DM, gas, gas_model
+    #}}}
     def __getitem__(self, index) :#{{{
         __ID = get_worker_info().id if GLOBDAT.num_workers > 0 else 0
+        __got_from_individual_box = False
         if self.stepper is not None :
             assert ARGS.mode != 'train', 'It does not make sense to have a stepper in training mode.'
             assert self.mode != 'training', 'It does not make sense to have a stepper in training mode.'
             __xx, __yy, __zz = self.stepper[index]
+        elif self.rnd_generators[__ID].rand() < GLOBDAT.individual_boxes_fraction :
+            __got_from_individual_box = True
+            DM, gas, gas_model = self.get_from_individual_box(__ID)
         elif self.xx_indices_rnd is None or self.yy_indices_rnd is None or self.zz_indices_rnd is None :
             __xx, __yy, __zz = self.position_selectors[__ID]()
         else :
             assert self.mode != 'training', 'This will produce always the same samples, not recommended in training mode.'
             __xx, __yy, __zz = self.xx_indices_rnd[index], self.yy_indices_rnd[index], self.zz_indices_rnd[index]
 
-        DM, gas, gas_model = self.getitem_deterministic(
-            __xx, __yy, __zz,
-            __ID
-            )
+        if not __got_from_individual_box :
+            DM, gas, gas_model = self.getitem_deterministic(
+                __xx, __yy, __zz,
+                __ID
+                )
+
         if self.do_random_transformations :
             DM, gas, gas_model = self.__randomly_transform(DM, gas, gas_model, __ID)
         if GLOBDAT.gas_noise > 0.0 and self.mode == 'training' :

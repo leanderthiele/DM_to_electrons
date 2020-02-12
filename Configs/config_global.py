@@ -44,6 +44,12 @@ this_config = {
                             'halo_weight_fct': 'lambda logM, dlogM : 1.0',
                             'pos_mass_file': '/tigress/lthiele/Illustris_300-1_Dark/important_halos.hdf5',
                           },
+ 
+    # individual cluster boxes
+    'individual_boxes_fraction': 0.0,
+    'individual_boxes_size': 128,
+    'individual_boxes_max_index': 2000,
+    # TODO maybe have a mass weighting here as well -- probably not, looking at their mass function
 
     # when to switch to the full network (after only seeing the model)
     'pretraining_epochs': 0,
@@ -77,6 +83,7 @@ this_config = {
                                          },
 
     'input_path' : '/tigress/lthiele/boxes/hdf5_files/',
+    'individual_boxes_path' : '/tigress/lthiele/individual_boxes/hdf5_files/', # contains /default/size_2048/*.hdf5
     'output_path': '/scratch/gpfs/lthiele/Outputs/',
     'summary_path':'/scratch/gpfs/lthiele/summaries/'
 }

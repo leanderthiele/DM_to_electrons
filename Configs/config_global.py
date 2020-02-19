@@ -54,6 +54,9 @@ this_config = {
     # when to switch to the full network (after only seeing the model)
     'pretraining_epochs': 0,
 
+    # epochs when a separate copy of the network should be saved
+    'breakpoints': [],
+
     # target transformation
     'target_transformation': True,
     'target_transformation_kw': {
@@ -83,7 +86,7 @@ this_config = {
                                          },
 
     'input_path' : '/tigress/lthiele/boxes/hdf5_files/',
-    'individual_boxes_path' : '/tigress/lthiele/individual_boxes/hdf5_files/', # contains /default/size_2048/*.hdf5
+    'individual_boxes_path' : '/tigress/lthiele/individual_boxes/hdf5_files/',
     'output_path': '/scratch/gpfs/lthiele/Outputs/',
     'summary_path':'/scratch/gpfs/lthiele/summaries/'
 }

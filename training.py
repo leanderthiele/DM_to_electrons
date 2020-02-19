@@ -92,7 +92,9 @@ def _merge(source, destination):#{{{
 class _ArgParser(object) :#{{{
     def __init__(self) :#{{{
         _modes    = ['train', 'valid', ]
-        _scalings = ['default', 'default_smoothed', ]
+#        _scalings = ['default', 'default_smoothed', 'default_centred', 'default_centred_nobatt', 
+#                     'default_battcorrected', 'default_centred_battcorrected', 'default_centred_nobatt_battcorrected', ]
+        _scalings = ['default_centred_battcorrected'] # the others are not implemented yet
 
         self.__parser = argparse.ArgumentParser(
             description='Code to train on DM only sims and hydro sims to \
@@ -199,7 +201,7 @@ class _ArgParser(object) :#{{{
             )
         self.__parser.add_argument(
             '--nocopy',
-            action = 'store_false',
+            action = 'store_true',
             help = 'Do not copy the data to the local GPU node disk.',
             )
         self.__parser.add_argument(
@@ -313,6 +315,9 @@ class GlobalData(object) :#{{{
         # pretraining
         self.__pretraining_epochs = ARGS['pretraining_epochs']
 
+        # breakpoints -- at those epochs, the network is saved separately
+        self.__breakpoints = ARGS['breakpoints']
+
         # target transformation
         #   want the target transformation to happen on GPU, so push these there
         self.__tau   = ARGS['target_transformation_kw']['tau']
@@ -347,7 +352,6 @@ class GlobalData(object) :#{{{
                 self.individual_boxes_path = '%s%s/size_%d/'%(self.__individual_boxes_path, ARGS.scaling, self.box_sidelength)
             else :
                 self.individual_boxes_path = None
-
 
         # Some hardcoded values
         self.block_shapes = {'training':   (self.box_sidelength, self.box_sidelength           , (1428*self.box_sidelength)/2048),
@@ -493,6 +497,9 @@ class GlobalData(object) :#{{{
             if ARGS.verbose :
                 print 'Failed to load network %s from disk.\n Starting training with random initialization.'%name
     #}}}
+    def breakpoint_reached(self) :#{{{
+        return EPOCH in self.__breakpoints
+    #}}}
 #}}}
 
 class Stepper(object) :#{{{
@@ -611,8 +618,8 @@ class InputData(Dataset) :#{{{
         __types = ['DM', 'gas', 'gas_model', ]
 
         self.mode = mode
-        assert self.mode in __modes
         self.stepper = stepper
+        assert self.mode in __modes
 
         self.do_random_transformations = True if self.stepper is None else False
 
@@ -642,15 +649,15 @@ class InputData(Dataset) :#{{{
             elif self.mode == 'validation' :
                 self.rnd_generators.append(np.random.RandomState(ii)) # use always the same seed for validation set (easier comparison)
         
-        if GLOBDAT.individual_boxes_fraction > 0.0 :
+        if GLOBDAT.individual_boxes_fraction > 0.0 and self.mode == 'training' :
             for jj in xrange(GLOBDAT.individual_boxes_max_index + 1) :
-                if isfile('%sh%d.hdf5'%(GLOBDAT.individual_boxes_path, jj)) :
+                if isfile('%shnew%d.hdf5'%(GLOBDAT.individual_boxes_path, jj)) :
                     self.individual_boxes_Nfiles += 1
                     for ii in xrange(max(GLOBDAT.num_workers, 1)) :
-                        self.individual_box_files.append(h5py.File('%sh%d.hdf5'%(GLOBDAT.individual_boxes_path, jj)),
-                                                         'r', driver='mpio', comm=MPI.COMM_WORLD)
+                        self.individual_box_files.append(h5py.File('%shnew%d.hdf5'%(GLOBDAT.individual_boxes_path, jj),
+                                                         'r', driver='mpio', comm=MPI.COMM_WORLD))
                         for t in __types :
-                            self.individual_box_datasets[t].append(self.individual_box_files[-1][t])
+                            self.individual_box_datasets[t].append(self.individual_box_files[-1]['%s/%s'%(t, self.mode)])
             assert self.individual_boxes_Nfiles > 0, 'No individual boxes found.'
 
         # read the backward transformations
@@ -776,7 +783,8 @@ class InputData(Dataset) :#{{{
             assert ARGS.mode != 'train', 'It does not make sense to have a stepper in training mode.'
             assert self.mode != 'training', 'It does not make sense to have a stepper in training mode.'
             __xx, __yy, __zz = self.stepper[index]
-        elif self.rnd_generators[__ID].rand() < GLOBDAT.individual_boxes_fraction :
+        elif self.mode == 'traning' and self.rnd_generators[__ID].rand() < GLOBDAT.individual_boxes_fraction :
+            __xx, __yy, __zz = 0.0, 0.0, 0.0
             __got_from_individual_box = True
             DM, gas, gas_model = self.get_from_individual_box(__ID)
         elif self.xx_indices_rnd is None or self.yy_indices_rnd is None or self.zz_indices_rnd is None :
@@ -1574,6 +1582,8 @@ if __name__ == '__main__' :
                 if not ARGS.debug :
                     GLOBDAT.save_loss('loss_%s.npz'%ARGS.output)
                     GLOBDAT.save_network('trained_network_%s.pt'%ARGS.output, ARGS.savebest)
+                    if GLOBDAT.breakpoint_reached() :
+                        GLOBDAT.save_network('trained_network_%s_%d.pt'%(ARGS.output, EPOCH), False)
 
                 EPOCH += 1
     #}}}

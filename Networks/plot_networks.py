@@ -3,12 +3,14 @@ import collections
 import copy
 from importlib import import_module
 
+DETAILED = False
+
 DIM_IN = 64 # current DM box size
 DIM_OUT = 32 # current gas box size
 
 # First determine all the plane coordinates
 HORI = 0.75 # units
-VERT = 1.0 # units
+VERT = -3.0 # units
 
 # Pretty Layers
 T = 0.1*HORI
@@ -163,7 +165,7 @@ class Arrow(object) :#{{{
         self.yout = point_out.yy
         self.mode = mode
         self.description = ''
-    def draw(self, pos='non_defaults') :
+    def draw(self, pos='non_defaults', halfway='middle') :
         self.set_text(pos)
         if self.mode.conv is 'Copy' :
             ls = 'dashed'
@@ -178,26 +180,32 @@ class Arrow(object) :#{{{
                 )
             FILE.write('\n')
         else :
+            if halfway=='middle' :
+                HALFWAYH = 0.5*(self.xin+0.5*B+self.xout-T)
+            elif halfway=='right' :
+                HALFWAYH = self.xout-0.5*(HORI-0.5*B-T)-T
+            elif halfway=='left':
+                HALFWAYH = self.xin+0.5*(HORI-0.5*B-T)+0.5*B
             FILE.write(
                 r'\draw[%s] (%.2f,%.2f) -- (%.2f,%.2f);'%(
                     ls,
                     self.xin+0.5*B, self.yin+np.sign(self.yout-self.yin)*0.25*VERT*np.sign(VERT),
-                    0.5*(self.xin+0.5*B+self.xout-T), self.yin+np.sign(self.yout-self.yin)*0.25*VERT*np.sign(VERT)
+                    HALFWAYH, self.yin+np.sign(self.yout-self.yin)*0.25*VERT*np.sign(VERT)
                     )
                 )
             FILE.write('\n')
             FILE.write(
                 r'\draw[%s] (%.2f,%.2f) -- (%.2f,%.2f);'%(
                     ls,
-                    0.5*(self.xin+0.5*B+self.xout-T), self.yin+np.sign(self.yout-self.yin)*0.25*VERT*np.sign(VERT),
-                    0.5*(self.xin+0.5*B+self.xout-T), self.yout-np.sign(self.yout-self.yin)*0.25*VERT*np.sign(VERT)
+                    HALFWAYH, self.yin+np.sign(self.yout-self.yin)*0.25*VERT*np.sign(VERT),
+                    HALFWAYH, self.yout-np.sign(self.yout-self.yin)*0.25*VERT*np.sign(VERT)
                     )
                 )
             FILE.write('\n')
             FILE.write(
                 r'\draw [->,%s] (%.2f,%.2f) -- (%.2f,%.2f);'%(
                     ls,
-                    0.5*(self.xin+0.5*B+self.xout-T), self.yout-np.sign(self.yout-self.yin)*0.25*VERT*np.sign(VERT),
+                    HALFWAYH, self.yout-np.sign(self.yout-self.yin)*0.25*VERT*np.sign(VERT),
                     self.xout-T, self.yout-np.sign(self.yout-self.yin)*0.25*VERT*np.sign(VERT)
                     )
                 )
@@ -266,6 +274,11 @@ __default_param = {#{{{
         'inplace': False,
         },
 
+    'dropout': False,
+    'dropout_kw': {
+        'p': 0.0,
+        },
+
     'crop_output': False,
     }
 #}}}
@@ -300,10 +313,10 @@ def draw_network(name) :#{{{
     global FILE
     global NLevels
 
-    this_network = import_module('network_%d'%index).this_network
+    this_network = import_module('network_%s'%name).this_network
     NLevels = this_network['NLevels']
 
-    FILE = open('./tex_files/network%d.tex'%index, 'w')
+    FILE = open('./tex_files/network%s.tex'%name, 'w')
     
     xx = 0
 
@@ -337,9 +350,9 @@ def draw_network(name) :#{{{
             for key, value in layer_dict_flat.items() :
                 if key is 'inplane' or key is 'outplane' :
                     continue
-                if __default_param_flat[key] != value :
+                if __default_param_flat[key] != value and DETAILED :
                     a.add_text(r'\texttt{%s:%s}'%(key, value))
-            if a.description is '' and not gave_defaults :
+            if a.description is '' and not gave_defaults and DETAILED :
                 a.add_text(r'default parameters:')
                 a.add_text(__default_param_text)
                 gave_defaults = True
@@ -365,16 +378,26 @@ def draw_network(name) :#{{{
             level_states[ii] = amode_cat.out_layer(level_states[ii]) + level_states[ii+1]
         else :
             level_states[ii] = level_states[ii+1]
+        if 'globallocalskip' in this_network :
+            if ii == this_network['globallocalskip']['feed_in'] :
+                amode_feed_in = ArrowMode({
+                    'conv': 'Copy',
+                    'resize_to_gas': False,
+                    })
+                a = Arrow(Layer(Point(_skip_state.xx*HORI, _skip_state.yy*VERT), _skip_state), Point(xx*HORI, ii*VERT), amode_feed_in)
+                a.draw(None, 'right')
+                level_states[ii] = amode_feed_in.out_layer(_skip_state) + level_states[ii]
         if ii == 0 and (this_network['feed_model'] if 'feed_model' in this_network else False) :
+            MODEL_OFFSET = 2
             if 'model_block' not in this_network :
                 feed_state = LayerMode(1, DIM_OUT)
-                feed_layer = Layer(Point((xx-2)*HORI, -4*VERT), feed_state)
+                feed_layer = Layer(Point((xx-2)*HORI, -MODEL_OFFSET*VERT), feed_state)
                 feed_layer.add_text(r'\textbf{Model}')
                 feed_layer.draw()
                 feed_layer.set_text()
             else :
                 feed_state = LayerMode(1, DIM_OUT)
-                feed_layer = Layer(Point((xx-2-len(this_network['model_block']))*HORI, -4*VERT), feed_state)
+                feed_layer = Layer(Point((xx-2-len(this_network['model_block']))*HORI, -MODEL_OFFSET*VERT), feed_state)
                 feed_layer.add_text(r'\textbf{Model}')
                 feed_layer.draw()
                 feed_layer.set_text()
@@ -384,7 +407,7 @@ def draw_network(name) :#{{{
                     feed_state.xx = xx-1-len(this_network['model_block'])+jj
                     a_feed = Arrow(
                         feed_layer,
-                        Point((xx-1-len(this_network['model_block'])+jj)*HORI, -4*VERT),
+                        Point((xx-1-len(this_network['model_block'])+jj)*HORI, -MODEL_OFFSET*VERT),
                         amode
                         )
                     # check if non-default settings apply
@@ -396,7 +419,7 @@ def draw_network(name) :#{{{
                             a_feed.add_text(r'\texttt{%s:%s}'%(key, value))
                     a_feed.draw()
                     feed_layer = Layer(
-                        Point((xx-1-len(this_network['model_block'])+jj)*HORI, -4*VERT),
+                        Point((xx-1-len(this_network['model_block'])+jj)*HORI, -MODEL_OFFSET*VERT),
                         feed_state
                         )
                     feed_layer.draw()
@@ -419,7 +442,7 @@ def draw_network(name) :#{{{
             for key, value in layer_dict_flat.items() :
                 if key is 'inplane' or key is 'outplane' :
                     continue
-                if __default_param_flat[key] != value :
+                if __default_param_flat[key] != value and DETAILED :
                     a.add_text(r'\texttt{%s:%s}'%(key, value))
             a.draw()
             l = Layer(Point(xx*HORI, ii*VERT), level_states[ii])
@@ -430,10 +453,44 @@ def draw_network(name) :#{{{
             l.draw()
             xx += 1
 
+        if 'globallocalskip' in this_network :
+            SKIPOFFSETH = 3
+            SKIPOFFSETV = 1
+            if ii == this_network['globallocalskip']['feed_out'] :
+                amode_feed_out = ArrowMode({
+                    'conv': 'Copy',
+                    'resize_to_gas': False,
+                    })
+                _xx = xx+SKIPOFFSETH
+                a = Arrow(Layer(Point((xx-1)*HORI, ii*VERT), level_states[ii]), Point(_xx*HORI, (ii+SKIPOFFSETV)*VERT), amode_feed_out)
+                a.draw(None, 'left')
+                _skip_state = level_states[ii]
+                _l = Layer(Point(_xx*HORI, (ii+SKIPOFFSETV)*VERT), _skip_state)
+                _l.draw()
+                _xx += 1
+                for jj,layer_dict in enumerate(this_network['globallocalskip']['block']) :
+                    amode = ArrowMode(__merge(layer_dict, copy.deepcopy(__default_param)))
+                    _skip_state = amode.out_layer(_skip_state)
+                    a = Arrow(_l, Point(_xx*HORI, (ii+SKIPOFFSETV)*VERT), amode)
+                    # check is non-default settings apply
+                    layer_dict_flat = __flatten_dict(layer_dict)
+                    for key, value in layer_dict_flat.items() :
+                        if key is 'inplane' or key is 'outplane' :
+                            continue
+                        if __default_param_flat[key] != value and DETAILED :
+                            a.add_text(r'\texttt{%s:%s}'%(key, value))
+                    a.draw()
+                    _l = Layer(Point(_xx*HORI, (ii+SKIPOFFSETV)*VERT), _skip_state)
+                    _l.draw()
+                    _xx += 1
+                _skip_state.xx = _xx-1
+                _skip_state.yy = ii+SKIPOFFSETV
+
     FILE.close()
 #}}}
 
 
+"""
 index = 0
 while True :
     try :
@@ -443,3 +500,5 @@ while True :
     except ImportError :
         print 'loaded %d networks'%index
         break
+"""
+draw_network('Mar2globallocalskip61')

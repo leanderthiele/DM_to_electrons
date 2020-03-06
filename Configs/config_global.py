@@ -85,8 +85,9 @@ this_config = {
                                             'verbose': True,
                                          },
 
-    'input_path' : '/tigress/lthiele/boxes/hdf5_files/',
+#    'input_path' : '/tigress/lthiele/boxes/hdf5_files/',
+    'input_path': '/scratch/gpfs/lthiele/boxes/hdf5_files/',
     'individual_boxes_path' : '/tigress/lthiele/individual_boxes/hdf5_files/',
     'output_path': '/scratch/gpfs/lthiele/Outputs/',
-    'summary_path':'/scratch/gpfs/lthiele/summaries/'
+    'summary_path':'/scratch/gpfs/lthiele/summaries/',
 }

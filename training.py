@@ -94,7 +94,7 @@ class _ArgParser(object) :#{{{
         _modes    = ['train', 'valid', ]
 #        _scalings = ['default', 'default_smoothed', 'default_centred', 'default_centred_nobatt', 
 #                     'default_battcorrected', 'default_centred_battcorrected', 'default_centred_nobatt_battcorrected', ]
-        _scalings = ['default_centred_battcorrected'] # the others are not implemented yet
+        _scalings = ['default_centred_battcorrected', 'default_centred_smoothed_battcorrected', ] # the others are not implemented yet
 
         self.__parser = argparse.ArgumentParser(
             description='Code to train on DM only sims and hydro sims to \
@@ -658,6 +658,7 @@ class InputData(Dataset) :#{{{
                                                          'r', driver='mpio', comm=MPI.COMM_WORLD))
                         for t in __types :
                             self.individual_box_datasets[t].append(self.individual_box_files[-1]['%s/%s'%(t, self.mode)])
+            print 'Found %d individual boxes.'%self.individual_boxes_Nfiles
             assert self.individual_boxes_Nfiles > 0, 'No individual boxes found.'
 
         # read the backward transformations
@@ -974,6 +975,11 @@ class Network(nn.Module) :#{{{
                 )
             )
 
+        if 'feed_model' in self.network_dict :
+            self.__feed_model = self.network_dict['feed_model']
+        else :
+            self.__feed_model = False
+
         if 'model_block' in self.network_dict :
             if not self.network_dict['feed_model'] :
                 raise RuntimeError('You provided a model block but do not require model feed. Aborting.')
@@ -982,6 +988,33 @@ class Network(nn.Module) :#{{{
                 )
         else :
             self.__model_block = None
+
+        if 'globallocalskip' in self.network_dict :
+            self.__globallocalskip = True
+            self.__globallocalskip_feed_out = self.network_dict['globallocalskip']['feed_out']
+            self.__globallocalskip_feed_in  = self.network_dict['globallocalskip']['feed_in']
+            self.__globallocalskip_block    = Network.__feed_forward_block(
+                self.network_dict['globallocalskip']['block']
+                )
+        else :
+            self.__globallocalskip = False
+
+        if 'multiply_model' in self.network_dict :
+            self.__multiply_model = self.network_dict['multiply_model']
+        else :
+            self.__multiply_model = False
+
+        if 'take_exponential' in self.network_dict :
+            self.__take_exponential = self.network_dict['take_exponential']
+        else :
+            self.__take_exponential = False
+
+        if 'take_sinh' in self.network_dict :   
+            self.__take_sinh = self.network_dict['take_sinh']
+        else :
+            self.__take_sinh = False
+        
+        assert not (self.__take_exponential and self.__take_sinh), 'It does not make much sense do to both transformations.'
 
         self.is_frozen = False
     #}}}
@@ -1031,6 +1064,7 @@ class Network(nn.Module) :#{{{
 #        if not GLOBDAT.pretraining() :
         if True :
             intermediate_data = []
+            xglobal = None
 
             # contracting path
             for ii in xrange(self.network_dict['NLevels']-1) :
@@ -1049,15 +1083,28 @@ class Network(nn.Module) :#{{{
                     if self.network_dict['Level_%d'%ii]['resize_to_gas'] :
                         intermediate_data[ii] = Network.__crop_tensor(
                             intermediate_data[ii],
-                            intermediate_data[ii].shape[-1]/GLOBDAT.DM_sidelength * (GLOBDAT.DM_sidelength - GLOBDAT.gas_sidelength) # TODO CHECK
+                            (intermediate_data[ii].shape[-1] * (GLOBDAT.DM_sidelength - GLOBDAT.gas_sidelength))/GLOBDAT.DM_sidelength # TODO CHECK
                             )
                     x = torch.cat((x, intermediate_data[ii]), dim = 1)
-                if ii == 0 and self.network_dict['feed_model'] :
+                if self.__globallocalskip :
+                    if ii == self.__globallocalskip_feed_in :
+                        x = torch.cat((x, xglobal), dim = 1)
+                if ii == 0 and self.__take_exponential :
+                    x = torch.exp(x)
+                if ii == 0 and self.__take_sinh :
+                    x = torch.sinh(x)
+                if ii == 0 and self.__feed_model :
                     if self.__model_block is not None :
                         xmodel = torch.cat((xmodel, self.__model_block(xmodel)), dim = 1)
                         # include a skip connection
-                    x = torch.cat((x, xmodel), dim = 1)
+                    if not self.__multiply_model :
+                        x = torch.cat((x, xmodel), dim = 1)
+                    else :
+                        x[:,0,...] = torch.mul(x[:,0,...], xmodel[:,0,...])
                 x = self.__blocks[2*ii+1](x)
+                if self.__globallocalskip :
+                    if ii == self.__globallocalskip_feed_out :
+                        xglobal = self.__globallocalskip_block(x)
 
         else :
             raise NotImplementedError('Currently this path is not up to date.')
@@ -1150,7 +1197,7 @@ class Analysis(object) :#{{{
 #        self.original_field_mesh = Mesh(Analysis.apodize(self.original_field))
         self.original_field_mesh = Mesh(self.original_field)
         self.original_field_mesh.read_mesh()
-    #}}}predicted_projpower_spectrum
+    #}}}
     def predict_whole_volume(self) :#{{{
         # initialize prediction to -1 everywhere to check whether the whole volume
         # really is filled.
@@ -1177,31 +1224,34 @@ class Analysis(object) :#{{{
         self.predicted_field_mesh = Mesh(self.predicted_field)
         self.predicted_field_mesh.read_mesh()
     #}}}
-    def compute_powerspectrum(self, mode) :#{{{
+    def compute_powerspectrum(self, mode, save=True) :#{{{
         if mode is 'original' :
             r = self.original_field_mesh.compute_powerspectrum()
             self.original_power_spectrum = {
                 'k': r.power['k'],
                 'P': r.power['power'].real,
                 }
-            np.savez(
-                ARGS['summary_path']+'%s_%s_%d.npz'%(ARGS.powerspectrumfid, ARGS.scaling, ARGS['box_sidelength']),
-                **self.original_power_spectrum
-                )
-            if ARGS.verbose :
-                print 'Computed original power spectrum and saved to %s.npz'%ARGS.powerspectrumfid
+            if save :
+                np.savez(
+                    ARGS['summary_path']+'%s_%s_%d.npz'%(ARGS.powerspectrumfid, ARGS.scaling, ARGS['box_sidelength']),
+                    **self.original_power_spectrum
+                    )
+                if ARGS.verbose :
+                    print 'Computed original power spectrum and saved to %s.npz'%ARGS.powerspectrumfid
         elif mode is 'predicted' :
             r = self.predicted_field_mesh.compute_powerspectrum()
             self.predicted_power_spectrum = {
                 'k': r.power['k'],
                 'P': r.power['power'].real,
+                'epoch': EPOCH,
                 }
-            np.savez(
-                ARGS['summary_path']+'%s_%s_%d.npz'%(ARGS.powerspectrumpred, ARGS.output, ARGS['box_sidelength']),
-                **self.predicted_power_spectrum
-                )
-            if ARGS.verbose :
-                print 'Computed predicted power spectrum and saved to %s_%s.npz'%(ARGS.powerspectrumpred, ARGS.output)
+            if save :
+                np.savez(
+                    ARGS['summary_path']+'%s_%s_%d.npz'%(ARGS.powerspectrumpred, ARGS.output, ARGS['box_sidelength']),
+                    **self.predicted_power_spectrum
+                    )
+                if ARGS.verbose :
+                    print 'Computed predicted power spectrum and saved to %s_%s.npz'%(ARGS.powerspectrumpred, ARGS.output)
         else :
             raise RuntimeError('Invalid mode in compute_powerspectrum, only original and predicted allowed.')
     #}}}
@@ -1223,6 +1273,7 @@ class Analysis(object) :#{{{
             self.predicted_projpower_spectrum = {
                 'k': r.power['k'],
                 'P': r.power['power'].real,
+                'epoch': EPOCH,
                 }
             np.savez(
                 ARGS['summary_path']+'%s_%s_%d.npz'%(ARGS.projpowerspectrumpred, ARGS.output, ARGS['box_sidelength']),
@@ -1235,11 +1286,16 @@ class Analysis(object) :#{{{
     #}}}
     def compute_correlation_coeff(self) :#{{{
         r = self.original_field_mesh.cross_power(self.predicted_field_mesh)
+        if self.original_power_spectrum is None :
+            self.compute_powerspectrum('original', False)
+        if self.predicted_power_spectrum is None :
+            self.compute_powerspectrum('predicted', False)
         assert np.allclose(r.power['k'], self.original_power_spectrum['k'])
         assert np.allclose(r.power['k'], self.predicted_power_spectrum['k'])
         self.cross = {
             'k': r.power['k'],
             'r': r.power['power'].real/np.sqrt(self.original_power_spectrum['P']*self.predicted_power_spectrum['P']),
+            'epoch': EPOCH,
             }
         np.savez(
             ARGS['summary_path']+'%s_%s_%d.npz'%(ARGS.crosspower, ARGS.output, ARGS['box_sidelength']),
@@ -1287,15 +1343,13 @@ class Analysis(object) :#{{{
                 mean_all = self.mean_all_predicted,
                 std_all = std_all,
                 mean_high = mean_high,
+                epoch = EPOCH,
                 )
             if ARGS.verbose :
                 print 'Computed predicted one-point PDF and saved to %s_%s.npz'%(ARGS.onepointpred, ARGS.output)
     #}}}
     def save_predicted_volume(self) :#{{{
-        np.save(
-            ARGS['summary_path']+'%s_%s_%d'%(ARGS.fieldpred, ARGS.output, ARGS['box_sidelength']),
-            self.predicted_field
-            )
+        self.predicted_field.tofile(ARGS['summary_path']+'%s_%s_%d.bin'%(ARGS.fieldpred, ARGS.output, ARGS['box_sidelength']))
     #}}}
 #}}}
 
@@ -1443,15 +1497,15 @@ if __name__ == '__main__' :
                 a = Analysis(validation_set)
 
                 a.read_original()
-                a.compute_powerspectrum('original')
-                a.compute_projected_powerspectrum('original')
-                a.compute_onepoint('original')
+#                a.compute_powerspectrum('original')
+#                a.compute_projected_powerspectrum('original')
+#                a.compute_onepoint('original')
                 a.predict_whole_volume()
                 a.compute_powerspectrum('predicted')
                 a.compute_projected_powerspectrum('predicted')
                 a.compute_onepoint('predicted')
                 a.compute_correlation_coeff()
-                #a.save_predicted_volume()
+#                a.save_predicted_volume()
 
                 if False :
                     plt.loglog(
@@ -1542,8 +1596,12 @@ if __name__ == '__main__' :
                             print '\ttraining loss : %.3e'%loss.item()
 
                         GLOBDAT.update_training_loss(loss.item())
-                        loss.backward()
-                        GLOBDAT.optimizer.step()
+                        if np.isfinite(loss.item()) :
+                            loss.backward()
+                            GLOBDAT.optimizer.step()
+                        else :
+                            if ARGS.verbose :
+                                print 'Found infinity in training loss, not backpropagating.'
                         
                         if GLOBDAT.stop_training() and not ARGS.debug :
                             GLOBDAT.save_loss('loss_%s.npz'%ARGS.output)
@@ -1568,6 +1626,7 @@ if __name__ == '__main__' :
                 # end evaluate on validation set
 
                 if ARGS.verbose :
+                    print '---- EPOCH %d ----'%EPOCH
                     print 'validation loss : %.6e'%(_loss/(t_val+1.0))
                 GLOBDAT.update_validation_loss(_loss/(t_val+1.0))
 

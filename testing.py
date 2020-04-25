@@ -24,6 +24,12 @@ class _ArgParser(object) :#{{{
             )
 
         self.__parser.add_argument(
+            '-o', '--output',
+            nargs = '?',
+            required = True,
+            help = 'Identifier of output files (loss and trained_network).'
+            )
+        self.__parser.add_argument(
             '-psfid', '--powerspectrumfid',
             nargs = '?',
             default = 'psfid',
@@ -193,16 +199,16 @@ class Field(object) :#{{{
     #}}}
     def compute_powerspectrum(self, other, save=True) :#{{{
         if other is None :
-            self.__compute_powerspectrum(save)
+            self.__compute_powerspectrum()
             if save :
                 self._save_powerspectrum()
         else :
             assert isinstance(other, Field)
             assert np.allclose(self.BoxSize, other.BoxSize)
             Pk = PKL.XPk([self.data, other.data], self.BoxSize, 0, [self.MAS, other.MAS], ARGS.threads)
-            self.powerspectrum = {'k': Pk.k1D, 'P': Pk.Pk1D[:,0], }
-            other.powerspectrum = {'k': Pk.k1D, 'P': Pk.Pk1D[:,1], }
-            self.crosspower = {'k': Pk.k1D, 'r': Pk.PkX1D[:,0]/np.sqrt(Pk.Pk1D[:,0]*Pk.Pk1D[:,1]), }
+            self.powerspectrum = {'k': Pk.k3D, 'P': Pk.Pk[:,0,0], }
+            other.powerspectrum = {'k': Pk.k3D, 'P': Pk.Pk[:,0,1], }
+            self.crosspower = {'k': Pk.k3D, 'r': Pk.XPk[:,0,0]/np.sqrt(Pk.Pk[:,0,0]*Pk.Pk[:,0,1]), }
             if save :
                 self._save_powerspectrum()
                 other._save_powerspectrum()
@@ -216,7 +222,7 @@ class Field(object) :#{{{
         # (1) triangle configurations k = 1, 3, varying angles
         _k1 = 1.0
         _k2 = 3.0
-        _theta = np.linspace(0.0, np.pi, num=10)
+        _theta = np.linspace(0.0, np.pi, num=20)
         Bk1 = PKL.Bk(self.data, self.BoxSize, _k1, _k2, _theta, self.MAS, ARGS.threads).Q
         if ARGS.verbose :
             print 'Computed Bk1 in Field(%s)'%self.mode
@@ -224,13 +230,13 @@ class Field(object) :#{{{
         # (2) triangle configurations k = 0.1, 0.3, varying angles
         _k1 = 0.2
         _k2 = 0.3
-        _theta = np.linspace(0.0, np.pi, num=10)
+        _theta = np.linspace(0.0, np.pi, num=20)
         Bk2 = PKL.Bk(self.data, self.BoxSize, _k1, _k2, _theta, self.MAS, ARGS.threads).Q
         if ARGS.verbose :
             print 'Computed Bk2 in Field(%s)'%self.mode
 
         # (3) equilateral triangle configurations
-        _k = 10.0**np.linspace(np.log10(0.2), np.log10(3.0), num=10)
+        _k = 10.0**np.linspace(np.log10(0.2), np.log10(3.0), num=20)
         _theta = np.array([np.pi/3.0])
         Bk3 = []
         for k in _k :
@@ -252,20 +258,23 @@ if __name__ == '__main__' :
     global ARGS
     ARGS = _ArgParser()
 
-    fmdel = Field('model', '/scratch/gpfs/lthiele/boxes/testbox_gas_model_1024.bin')
+#    fmdel = Field('model', '/scratch/gpfs/lthiele/boxes/testbox_gas_model_1024.bin')
+    fpred = Field('predicted', '/scratch/gpfs/lthiele/boxes/pred_testbox_gas_1024.bin')
     ffid  = Field('fiducial', '/scratch/gpfs/lthiele/boxes/testbox_gas_1024.bin')
 
-#    try :
+    try :
+        fpred.compute_onepoint()
 #        ffid.compute_onepoint()
 #        fmdel.compute_onepoint()
-#    except Exception as e :
-#        print 'Failed to compute onepoint.'
-#        print traceback.print_exc()
-#        print e.__doc__
-#        print e.message
+    except Exception as e :
+        print 'Failed to compute onepoint.'
+        print traceback.print_exc()
+        print e.__doc__
+        print e.message
 
     try :
-        fmdel.compute_powerspectrum(ffid)
+        fpred.compute_powerspectrum(ffid)
+#        fmdel.compute_powerspectrum(ffid)
     except Exception as e :
         print 'Failed to compute powerspectrum.'
         print traceback.print_exc()
@@ -273,17 +282,11 @@ if __name__ == '__main__' :
         print e.message
 
     try :
-        ffid.compute_bispectrum()
+        fpred.compute_bispectrum()
+#        fmdel.compute_bispectrum()
+#        ffid.compute_bispectrum()
     except Exception as e :
-        print 'Failed to compute fiducial bispectrum.'
-        print traceback.print_exc()
-        print e.__doc__
-        print e.message
-
-    try :
-        fmdel.compute_bispectrum()
-    except Exception as e :
-        print 'Failed to compute model bispectrum.'
+        print 'Failed to compute bispectrum.'
         print traceback.print_exc()
         print e.__doc__
         print e.message

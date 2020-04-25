@@ -501,4 +501,4 @@ while True :
         print 'loaded %d networks'%index
         break
 """
-draw_network('Mar2globallocalskip61')
+draw_network('Feb26morechannelstakesinh')

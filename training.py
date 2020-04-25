@@ -7,11 +7,15 @@ from os.path import isfile
 import sys
 from importlib import import_module
 import argparse
+import traceback
+import gc
 
 # numerical libraries
 import numpy as np
 from nbodykit.lab import ArrayMesh, FFTPower
 from nbodykit.algorithms.fftpower import ProjectedFFTPower
+
+import Pk_library as PKL
 
 # HDF5
 import h5py
@@ -56,10 +60,10 @@ class LnLoss(nn.Module) :#{{{
         self.__pwr = kwargs['pwr']
     #}}}
     def forward(self, pred, targ) :#{{{
-        return torch.sum(torch.pow(
+        return torch.div(torch.sum(torch.pow(
             torch.abs(torch.add(pred, targ, alpha = -1.0)),
-            torch.tensor(self.__pwr, requires_grad = False).to(pred.device, dtype = torch.float32)
-            ))
+            torch.tensor(self.__pwr, requires_grad=False).to(pred.device, dtype=torch.float32)
+            )), torch.tensor(pred.numel(), requires_grad=False).to(pred.device, dtype=torch.float32))
     #}}}
 #}}}
 
@@ -68,6 +72,8 @@ _namesofplaces = {#{{{
     'ConvTranspose': nn.ConvTranspose3d,
     'BatchNorm': nn.BatchNorm3d,
     'ReLU': nn.ReLU,
+    'Softshrink': nn.Softshrink,
+    'Hardshrink': nn.Hardshrink,
     'LeakyReLU': nn.LeakyReLU,
     'MSELoss': nn.MSELoss,
     'L1Loss': nn.L1Loss,
@@ -91,10 +97,17 @@ def _merge(source, destination):#{{{
 
 class _ArgParser(object) :#{{{
     def __init__(self) :#{{{
-        _modes    = ['train', 'valid', ]
+        _modes    = ['train',
+                     'valid',
+                     'test',
+                     'interrogate', ]
 #        _scalings = ['default', 'default_smoothed', 'default_centred', 'default_centred_nobatt', 
 #                     'default_battcorrected', 'default_centred_battcorrected', 'default_centred_nobatt_battcorrected', ]
-        _scalings = ['default_centred_battcorrected', 'default_centred_smoothed_battcorrected', ] # the others are not implemented yet
+        _scalings = ['default_centred_battcorrected',
+                     'default_centred_smoothed_battcorrected',
+                     'default_centred_NE',
+                     'default_MOM', ] # the others are not implemented yet
+        _types = ['N', 'P', 'MOM', 'MOM1', 'MOM2', ]
 
         self.__parser = argparse.ArgumentParser(
             description='Code to train on DM only sims and hydro sims to \
@@ -148,10 +161,34 @@ class _ArgParser(object) :#{{{
             help = 'File to store fiducial powerspectrum.'
             )
         self.__parser.add_argument(
+            '-psmdel', '--powerspectrummdel',
+            nargs = '?',
+            default = 'psmdel',
+            help = 'File to store model powerspectrum.'
+            )
+        self.__parser.add_argument(
             '-pspred', '--powerspectrumpred',
             nargs = '?',
             default = 'pspred',
             help = 'File to store predicted powerspectrum.'
+            )
+        self.__parser.add_argument(
+            '-bkfid', '--bispectrumfid',
+            nargs = '?',
+            default = 'bkfid',
+            help = 'File to store fiducial bispectrum.'
+            )
+        self.__parser.add_argument(
+            '-bkmdel', '--bispectrummdel',
+            nargs = '?',
+            default = 'bkmdel',
+            help = 'File to store model bispectrum.'
+            )
+        self.__parser.add_argument(
+            '-bkpred', '--bispectrumpred',
+            nargs = '?',
+            default = 'bkpred',
+            help = 'File to store predicted bispectrum.'
             )
         self.__parser.add_argument(
             '-projpsfid', '--projpowerspectrumfid',
@@ -160,28 +197,46 @@ class _ArgParser(object) :#{{{
             help = 'File to store fiducial projected powerspectrum.'
             )
         self.__parser.add_argument(
+            '-projpsmdel', '--projpowerspectrummdel',
+            nargs = '?',
+            default = 'projpsmdel',
+            help = 'File to store model projected powerspectrum.'
+            )
+        self.__parser.add_argument(
             '-projpspred', '--projpowerspectrumpred',
             nargs = '?',
             default = 'projpspred',
             help = 'File to store predicted projected powerspectrum.'
             )
         self.__parser.add_argument(
-            '-cross', '--crosspower',
+            '-crossmdel', '--crosspowermdel',
             nargs = '?',
-            default = 'cross',
-            help = 'File to store correlation coefficient r(k)'
+            default = 'crossmdel',
+            help = 'File to store correlation coefficient r(k) for the model (wrt ground truth)'
+            )
+        self.__parser.add_argument(
+            '-crosspred', '--crosspowerpred',
+            nargs = '?',
+            default = 'crosspred',
+            help = 'File to store correlation coefficient r(k) for the prediction (wrt ground truth)'
             )
         self.__parser.add_argument(
             '-opfid', '--onepointfid',
             nargs = '?',
             default = 'opfid',
-            help = 'File to store fiducial powerspectrum.'
+            help = 'File to store fiducial one-point PDF.'
+            )
+        self.__parser.add_argument(
+            '-opmdel', '--onepointmdel',
+            nargs = '?',
+            default = 'opmdel',
+            help = 'File to store model one-point PDF.'
             )
         self.__parser.add_argument(
             '-oppred', '--onepointpred',
             nargs = '?',
             default = 'oppred',
-            help = 'File to store predicted powerspectrum.'
+            help = 'File to store predicted one-point PDF.'
             )
         self.__parser.add_argument(
             '-fpred', '--fieldpred',
@@ -233,6 +288,33 @@ class _ArgParser(object) :#{{{
             default='/home/lthiele/DM_to_electrons/Configs',
             help = 'Path where the configuration files are stored.',
             )
+        self.__parser.add_argument(
+            '-thr', '--threads',
+            nargs = '?',
+            type = int,
+            default = 1,
+            help = 'Number of OpenMP threads for power/bi-spectrum calculations.',
+            )
+        self.__parser.add_argument(
+            '-st', '--startepoch',
+            nargs = '?',
+            type = int,
+            default = -1,
+            help = 'Epoch to start from (if you do not want to continue at the pretrained epoch).',
+            )
+        self.__parser.add_argument(
+            '-type', '--type',
+            nargs = '?',
+            default = 'P',
+            help = 'Target type: P for electron pressure, N for electron density.',
+            )
+        self.__parser.add_argument(
+            '-momdir', '--momdir',
+            nargs = '?',
+            type = int,
+            default = 0,
+            help = 'Direction of momentum (0,1,2).',
+            )
         
         # parse now
         self.__args = self.__parser.parse_args()
@@ -244,6 +326,8 @@ class _ArgParser(object) :#{{{
         # consistency checks
         assert self.__args.mode    in _modes,    'Only %s modes implemented so far, passed %s.'%(_modes, self.__args.mode)
         assert self.__args.scaling in _scalings, 'Only %s scalings implemented so far, passed %s.'%(_scalings, self.__args.scaling)
+        assert self.__args.type    in _types,    'Only %s types implemented so far, passed %s.'%(_types, self.__args.type)
+        assert self.__args.momdir  in [0,1,2],   'momentum direction %d invalid.'%self.__args.momdir
 
         # read config files
         self.final_config = self.__read_configs()
@@ -278,6 +362,9 @@ class GlobalData(object) :#{{{
         self.box_sidelength = ARGS['box_sidelength']
         self.gas_sidelength = (ARGS['gas_sidelength']*self.box_sidelength)/2048
         self.DM_sidelength  = (ARGS['DM_sidelength']*self.box_sidelength)/2048
+        self.dim = 1 if ARGS.type in ['N', 'P', 'MOM2', ]   \
+                   else 3 if ARGS.type in ['MOM', 'MOM1', ] \
+                   else None
         assert not self.gas_sidelength%2, 'Only even gas_sidelength is supported.'
         assert not self.DM_sidelength%2,  'Only even DM_sidelength is supported.'
 
@@ -333,8 +420,12 @@ class GlobalData(object) :#{{{
 
         if GPU_AVAIL and not ARGS.debug and not ARGS.nocopy :
             print 'Starting to copy data to /tmp'
-            system('cp %s%s/size_%d.hdf5 /tmp/'%(self.__input_path, ARGS.scaling, self.box_sidelength))
-            self.data_path = '/tmp/size_%d.hdf5'%self.box_sidelength
+            if ARGS.mode == 'test' and ARGS.type=='P' :
+                system('cp %s%s/TESTBOX_size_%d.hdf5 /tmp/'%(self.__input_path, ARGS.scaling, self.box_sidelength))
+                self.data_path = '/tmp/TESTBOX_size_%d.hdf5'%self.box_sidelength
+            else :
+                system('cp %s%s/size_%d.hdf5 /tmp/'%(self.__input_path, ARGS.scaling, self.box_sidelength))
+                self.data_path = '/tmp/size_%d.hdf5'%self.box_sidelength
 
             if self.individual_boxes_fraction > 0.0 :
                 print 'Starting to copy individual boxes to /tmp'
@@ -346,7 +437,10 @@ class GlobalData(object) :#{{{
 
             print 'Finished copying data to /tmp, took %.2e seconds'%(time()-START_TIME) # 4.06e+02 sec for 2048, ~12 sec for 1024
         else :
-            self.data_path = '%s%s/size_%d.hdf5'%(self.__input_path, ARGS.scaling, self.box_sidelength)
+            if ARGS.mode == 'test' and ARGS.type in ['P', ] :
+                self.data_path = '%s%s/TESTBOX_size_%d.hdf5'%(self.__input_path, ARGS.scaling, self.box_sidelength)
+            else :
+                self.data_path = '%s%s/size_%d.hdf5'%(self.__input_path, ARGS.scaling, self.box_sidelength)
             
             if self.individual_boxes_fraction > 0.0 :
                 self.individual_boxes_path = '%s%s/size_%d/'%(self.__individual_boxes_path, ARGS.scaling, self.box_sidelength)
@@ -356,7 +450,9 @@ class GlobalData(object) :#{{{
         # Some hardcoded values
         self.block_shapes = {'training':   (self.box_sidelength, self.box_sidelength           , (1428*self.box_sidelength)/2048),
                              'validation': (self.box_sidelength,(1368*self.box_sidelength)/2048, ( 620*self.box_sidelength)/2048),
-                             'testing':    (self.box_sidelength,( 680*self.box_sidelength)/2048, ( 620*self.box_sidelength)/2048),
+                             'testing':    (self.box_sidelength,( 680*self.box_sidelength)/2048, ( 620*self.box_sidelength)/2048) if ARGS.type in ['N', 'MOM', 'MOM1', 'MOM2', ] \
+                                           else (self.box_sidelength,self.box_sidelength,self.box_sidelength) if ARGS.type in ['P', ]                            \
+                                           else None,
                             }
         self.box_size = 205.0 # Mpc/h
 
@@ -400,7 +496,10 @@ class GlobalData(object) :#{{{
         self.training_steps.append(len(self.training_loss))
     #}}}
     def update_validation_loss(self, this_loss) :#{{{
-        self.validation_loss.append(this_loss)
+        if np.isfinite(this_loss) :
+            self.validation_loss.append(this_loss)
+        else :
+            self.validation_loss.append(1e20)
         self.validation_steps.append(EPOCH)
     #}}}
     def pretraining(self) :#{{{
@@ -410,6 +509,7 @@ class GlobalData(object) :#{{{
         return EPOCH <= self.__pretraining_epochs/2
     #}}}
     def target_transformation(self, x) :#{{{
+        # assumes that the sign of x equals the sign of the untransformed target
         __t = (
               torch.tensor(min(EPOCH, self.__epoch_max), requires_grad = False).to(x.device, dtype = torch.float32)
             / torch.tensor(self.__tau, requires_grad = False).to(x.device, dtype = torch.float32)
@@ -420,7 +520,7 @@ class GlobalData(object) :#{{{
         __delta = torch.tensor(self.__delta, requires_grad = False).to(x.device, dtype = torch.float32)
         
         __alpha = __delta + (1.0 - __delta) * torch.exp(- __t)
-        return __kappa*__alpha*torch.log1p(x/__gamma) + (1.0-__alpha)*x
+        return __kappa*__alpha*torch.sign(x)*torch.log1p(torch.abs(x)/__gamma) + (1.0-__alpha)*x
     #}}}
     def stop_training(self) :#{{{
         return (time()-START_TIME)/60./60. > ARGS.time
@@ -482,7 +582,7 @@ class GlobalData(object) :#{{{
                         print '\tState dict for lr scheduler found but no lr scheduling requested in this run.'
 
             global EPOCH
-            EPOCH = __state['consistency']['epoch']
+            EPOCH = __state['consistency']['epoch'] if ARGS.startepoch == -1 else ARGS.startepoch
             # Consistency checks
             assert self.box_sidelength == __state['consistency']['box_sidelength'], 'Box sidelength does not match.'
             assert self.DM_sidelength == __state['consistency']['DM_sidelength'], 'DM sidelength does not match.'
@@ -505,9 +605,9 @@ class GlobalData(object) :#{{{
 class Stepper(object) :#{{{
     def __init__(self, mode) :#{{{
         self.mode = mode
-        self.xlength = GLOBDAT.block_shapes[mode][0] - GLOBDAT.DM_sidelength
-        self.ylength = GLOBDAT.block_shapes[mode][1] - GLOBDAT.DM_sidelength
-        self.zlength = GLOBDAT.block_shapes[mode][2] - GLOBDAT.DM_sidelength
+        self.xlength = GLOBDAT.block_shapes[self.mode][0] - GLOBDAT.DM_sidelength
+        self.ylength = GLOBDAT.block_shapes[self.mode][1] - GLOBDAT.DM_sidelength
+        self.zlength = GLOBDAT.block_shapes[self.mode][2] - GLOBDAT.DM_sidelength
 
         self.max_x_index = self.__max_index(self.xlength+1)
         self.max_y_index = self.__max_index(self.ylength+1)
@@ -564,6 +664,7 @@ class PositionSelector(object) :#{{{
             self.rnd_generator = np.random.RandomState((hash(str(clock()+seed))+hash(self.mode))%MAX_SEED)
         elif self.mode == 'validation' :
             self.rnd_generator = np.random.RandomState(seed)
+#            self.rnd_generator = np.random.RandomState(123467)
         if self.empty_fraction < 1.0 :
             if ARGS.verbose :
                 print 'In PositionSelector(%s) : Reading %s.'%(self.mode, kwargs['pos_mass_file'])
@@ -613,7 +714,7 @@ class PositionSelector(object) :#{{{
 #}}}
 
 class InputData(Dataset) :#{{{
-    def __init__(self, mode, stepper = None) :#{{{
+    def __init__(self, mode, stepper=None) :#{{{
         __modes = ['training', 'validation', 'testing', ]
         __types = ['DM', 'gas', 'gas_model', ]
 
@@ -623,9 +724,9 @@ class InputData(Dataset) :#{{{
 
         self.do_random_transformations = True if self.stepper is None else False
 
-        self.xlength = GLOBDAT.block_shapes[mode][0] - GLOBDAT.DM_sidelength
-        self.ylength = GLOBDAT.block_shapes[mode][1] - GLOBDAT.DM_sidelength
-        self.zlength = GLOBDAT.block_shapes[mode][2] - GLOBDAT.DM_sidelength
+        self.xlength = GLOBDAT.block_shapes[self.mode][0] - GLOBDAT.DM_sidelength
+        self.ylength = GLOBDAT.block_shapes[self.mode][1] - GLOBDAT.DM_sidelength
+        self.zlength = GLOBDAT.block_shapes[self.mode][2] - GLOBDAT.DM_sidelength
 
         self.files = []
         self.individual_box_files = []
@@ -685,41 +786,103 @@ class InputData(Dataset) :#{{{
             self.xx_indices_rnd[ii], self.yy_indices_rnd[ii], self.zz_indices_rnd[ii] = self.position_selectors[0]()
     #}}}
     def __randomly_transform(self, arr1, arr2, arr3, __ID) :#{{{
-        # reflections
-        if self.rnd_generators[__ID].rand() < 0.5 :
-            arr1 = arr1[::-1,:,:]
-            arr2 = arr2[::-1,:,:]
-            arr3 = arr3[::-1,:,:]
-        if self.rnd_generators[__ID].rand() < 0.5 :
-            arr1 = arr1[:,::-1,:]
-            arr2 = arr2[:,::-1,:]
-            arr3 = arr3[:,::-1,:]
-        if self.rnd_generators[__ID].rand() < 0.5 :
-            arr1 = arr1[:,::-1]
-            arr2 = arr2[:,::-1]
-            arr3 = arr3[:,::-1]
-        # transpositions
-        prand = self.rnd_generators[__ID].rand()
-        if prand < 1./6. :
-            arr1 = np.transpose(arr1, axes=(0,2,1))
-            arr2 = np.transpose(arr2, axes=(0,2,1))
-            arr3 = np.transpose(arr3, axes=(0,2,1))
-        elif prand < 2./6. :
-            arr1 = np.transpose(arr1, axes=(2,1,0))
-            arr2 = np.transpose(arr2, axes=(2,1,0))
-            arr3 = np.transpose(arr3, axes=(2,1,0))
-        elif prand < 3./6. :
-            arr1 = np.transpose(arr1, axes=(1,0,2))
-            arr2 = np.transpose(arr2, axes=(1,0,2))
-            arr3 = np.transpose(arr3, axes=(1,0,2))
-        elif prand < 4./6. :
-            arr1 = np.transpose(arr1, axes=(2,0,1))
-            arr2 = np.transpose(arr2, axes=(2,0,1))
-            arr3 = np.transpose(arr3, axes=(2,0,1))
-        elif prand < 5./6. :
-            arr1 = np.transpose(arr1, axes=(1,2,0))
-            arr2 = np.transpose(arr2, axes=(1,2,0))
-            arr3 = np.transpose(arr3, axes=(1,2,0))
+        # arr1 = DM, arr2 = gas, arr3 = gas_model
+        if GLOBDAT.dim == 1 and ARGS.type not in ['MOM2', ] :
+            # reflections
+            if self.rnd_generators[__ID].rand() < 0.5 :
+                arr1 = arr1[::-1,:,:]
+                arr2 = arr2[::-1,:,:]
+                arr3 = arr3[::-1,:,:]
+            if self.rnd_generators[__ID].rand() < 0.5 :
+                arr1 = arr1[:,::-1,:]
+                arr2 = arr2[:,::-1,:]
+                arr3 = arr3[:,::-1,:]
+            if self.rnd_generators[__ID].rand() < 0.5 :
+                arr1 = arr1[:,::-1]
+                arr2 = arr2[:,::-1]
+                arr3 = arr3[:,::-1]
+            # transpositions
+            prand = self.rnd_generators[__ID].rand()
+            if prand < 1./6. :
+                arr1 = np.transpose(arr1, axes=(0,2,1))
+                arr2 = np.transpose(arr2, axes=(0,2,1))
+                arr3 = np.transpose(arr3, axes=(0,2,1))
+            elif prand < 2./6. :
+                arr1 = np.transpose(arr1, axes=(2,1,0))
+                arr2 = np.transpose(arr2, axes=(2,1,0))
+                arr3 = np.transpose(arr3, axes=(2,1,0))
+            elif prand < 3./6. :
+                arr1 = np.transpose(arr1, axes=(1,0,2))
+                arr2 = np.transpose(arr2, axes=(1,0,2))
+                arr3 = np.transpose(arr3, axes=(1,0,2))
+            elif prand < 4./6. :
+                arr1 = np.transpose(arr1, axes=(2,0,1))
+                arr2 = np.transpose(arr2, axes=(2,0,1))
+                arr3 = np.transpose(arr3, axes=(2,0,1))
+            elif prand < 5./6. :
+                arr1 = np.transpose(arr1, axes=(1,2,0))
+                arr2 = np.transpose(arr2, axes=(1,2,0))
+                arr3 = np.transpose(arr3, axes=(1,2,0))
+        else :
+            # reflections -- leave the [3,...] elements untouched
+            if self.rnd_generators[__ID].rand() < 0.5 :
+                arr1 = arr1[:,::-1,:,:]
+                arr2 = arr2[:,::-1,:,:]
+                arr3 = arr3[:,::-1,:,:]
+                arr1[0,...] *= -1.0
+                arr2[0,...] *= -1.0
+                arr3[0,...] *= -1.0
+            if self.rnd_generators[__ID].rand() < 0.5 :
+                arr1 = arr1[:,:,::-1,:]
+                arr2 = arr2[:,:,::-1,:]
+                arr3 = arr3[:,:,::-1,:]
+                arr1[1,...] *= -1.0
+                arr2[1,...] *= -1.0
+                arr3[1,...] *= -1.0
+            if self.rnd_generators[__ID].rand() < 0.5 :
+                arr1 = arr1[:,:,:,::-1]
+                arr2 = arr2[:,:,:,::-1]
+                arr3 = arr3[:,:,:,::-1]
+                arr1[2,...] *= -1.0
+                arr2[2,...] *= -1.0
+                arr3[2,...] *= -1.0
+            # transpositions -- leave the [3,...] elements untouched
+            prand = self.rnd_generators[__ID].rand()
+            if prand < 1./6. :
+                arr1 = np.transpose(arr1, axes=(0,1,3,2))
+                arr2 = np.transpose(arr2, axes=(0,1,3,2))
+                arr3 = np.transpose(arr3, axes=(0,1,3,2))
+                arr1[[0,1,2,3],...] = arr1[[0,2,1,3],...]
+                arr2[[0,1,2],...] = arr2[[0,2,1],...]
+                arr3[[0,1,2],...] = arr3[[0,2,1],...]
+            elif prand < 2./6. :
+                arr1 = np.transpose(arr1, axes=(0,3,2,1))
+                arr2 = np.transpose(arr2, axes=(0,3,2,1))
+                arr3 = np.transpose(arr3, axes=(0,3,2,1))
+                arr1[[0,1,2,3],...] = arr1[[2,1,0,3],...]
+                arr2[[0,1,2],...] = arr2[[2,1,0],...]
+                arr3[[0,1,2],...] = arr3[[2,1,0],...]
+            elif prand < 3./6. :
+                arr1 = np.transpose(arr1, axes=(0,2,1,3))
+                arr2 = np.transpose(arr2, axes=(0,2,1,3))
+                arr3 = np.transpose(arr3, axes=(0,2,1,3))
+                arr1[[0,1,2,3],...] = arr1[[1,0,2,3],...]
+                arr2[[0,1,2],...] = arr2[[1,0,2],...]
+                arr3[[0,1,2],...] = arr3[[1,0,2],...]
+            elif prand < 4./6. :
+                arr1 = np.transpose(arr1, axes=(0,3,1,2))
+                arr2 = np.transpose(arr2, axes=(0,3,1,2))
+                arr3 = np.transpose(arr3, axes=(0,3,1,2))
+                arr1[[0,1,2,3],...] = arr1[[2,0,1,3],...]
+                arr2[[0,1,2],...] = arr2[[2,0,1],...]
+                arr3[[0,1,2],...] = arr3[[2,0,1],...]
+            elif prand < 5./6. :
+                arr1 = np.transpose(arr1, axes=(0,2,3,1))
+                arr2 = np.transpose(arr2, axes=(0,2,3,1))
+                arr3 = np.transpose(arr3, axes=(0,2,3,1))
+                arr1[[0,1,2,3],...] = arr1[[1,2,0,3],...]
+                arr2[[0,1,2],...] = arr2[[1,2,0],...]
+                arr3[[0,1,2],...] = arr3[[1,2,0],...]
         return arr1, arr2, arr3
     #}}}
     def __index_3D(self, index) :#{{{
@@ -736,21 +899,41 @@ class InputData(Dataset) :#{{{
         assert xx <= self.xlength
         assert yy <= self.ylength
         assert zz <= self.zlength
-        DM = self.datasets['DM'][__ID][
-            xx : xx+GLOBDAT.DM_sidelength,
-            yy : yy+GLOBDAT.DM_sidelength,
-            zz : zz+GLOBDAT.DM_sidelength
-            ]
-        gas = self.datasets['gas'][__ID][
-            xx+(GLOBDAT.DM_sidelength-GLOBDAT.gas_sidelength)/2 : xx+(GLOBDAT.DM_sidelength+GLOBDAT.gas_sidelength)/2,
-            yy+(GLOBDAT.DM_sidelength-GLOBDAT.gas_sidelength)/2 : yy+(GLOBDAT.DM_sidelength+GLOBDAT.gas_sidelength)/2,
-            zz+(GLOBDAT.DM_sidelength-GLOBDAT.gas_sidelength)/2 : zz+(GLOBDAT.DM_sidelength+GLOBDAT.gas_sidelength)/2,
-            ]
-        gas_model = self.datasets['gas_model'][__ID][
-            xx+(GLOBDAT.DM_sidelength-GLOBDAT.gas_sidelength)/2 : xx+(GLOBDAT.DM_sidelength+GLOBDAT.gas_sidelength)/2,
-            yy+(GLOBDAT.DM_sidelength-GLOBDAT.gas_sidelength)/2 : yy+(GLOBDAT.DM_sidelength+GLOBDAT.gas_sidelength)/2,
-            zz+(GLOBDAT.DM_sidelength-GLOBDAT.gas_sidelength)/2 : zz+(GLOBDAT.DM_sidelength+GLOBDAT.gas_sidelength)/2,
-            ]
+        if GLOBDAT.dim == 1 and ARGS.type not in ['MOM2', ] :
+            DM = self.datasets['DM'][__ID][
+                xx : xx+GLOBDAT.DM_sidelength,
+                yy : yy+GLOBDAT.DM_sidelength,
+                zz : zz+GLOBDAT.DM_sidelength
+                ]
+            gas = self.datasets['gas'][__ID][
+                xx+(GLOBDAT.DM_sidelength-GLOBDAT.gas_sidelength)/2 : xx+(GLOBDAT.DM_sidelength+GLOBDAT.gas_sidelength)/2,
+                yy+(GLOBDAT.DM_sidelength-GLOBDAT.gas_sidelength)/2 : yy+(GLOBDAT.DM_sidelength+GLOBDAT.gas_sidelength)/2,
+                zz+(GLOBDAT.DM_sidelength-GLOBDAT.gas_sidelength)/2 : zz+(GLOBDAT.DM_sidelength+GLOBDAT.gas_sidelength)/2,
+                ]
+            gas_model = self.datasets['gas_model'][__ID][
+                xx+(GLOBDAT.DM_sidelength-GLOBDAT.gas_sidelength)/2 : xx+(GLOBDAT.DM_sidelength+GLOBDAT.gas_sidelength)/2,
+                yy+(GLOBDAT.DM_sidelength-GLOBDAT.gas_sidelength)/2 : yy+(GLOBDAT.DM_sidelength+GLOBDAT.gas_sidelength)/2,
+                zz+(GLOBDAT.DM_sidelength-GLOBDAT.gas_sidelength)/2 : zz+(GLOBDAT.DM_sidelength+GLOBDAT.gas_sidelength)/2,
+                ]
+        else :
+            DM = self.datasets['DM'][__ID][
+                :,
+                xx : xx+GLOBDAT.DM_sidelength,
+                yy : yy+GLOBDAT.DM_sidelength,
+                zz : zz+GLOBDAT.DM_sidelength
+                ]
+            gas_model = self.datasets['gas_model'][__ID][
+                :,
+                xx+(GLOBDAT.DM_sidelength-GLOBDAT.gas_sidelength)/2 : xx+(GLOBDAT.DM_sidelength+GLOBDAT.gas_sidelength)/2,
+                yy+(GLOBDAT.DM_sidelength-GLOBDAT.gas_sidelength)/2 : yy+(GLOBDAT.DM_sidelength+GLOBDAT.gas_sidelength)/2,
+                zz+(GLOBDAT.DM_sidelength-GLOBDAT.gas_sidelength)/2 : zz+(GLOBDAT.DM_sidelength+GLOBDAT.gas_sidelength)/2,
+                ]
+            gas = self.datasets['gas'][__ID][
+                :,
+                xx+(GLOBDAT.DM_sidelength-GLOBDAT.gas_sidelength)/2 : xx+(GLOBDAT.DM_sidelength+GLOBDAT.gas_sidelength)/2,
+                yy+(GLOBDAT.DM_sidelength-GLOBDAT.gas_sidelength)/2 : yy+(GLOBDAT.DM_sidelength+GLOBDAT.gas_sidelength)/2,
+                zz+(GLOBDAT.DM_sidelength-GLOBDAT.gas_sidelength)/2 : zz+(GLOBDAT.DM_sidelength+GLOBDAT.gas_sidelength)/2,
+                ]
         return DM, gas, gas_model
     #}}}
     def get_from_individual_box(self, __ID) :#{{{
@@ -810,9 +993,14 @@ class InputData(Dataset) :#{{{
             gas_model *= self.rnd_generators[__ID].normal(1.0, GLOBDAT.gas_noise, size = gas_model.shape)
         if GLOBDAT.DM_noise > 0.0 and self.mode == 'training' :
             DM *= self.rnd_generators[__ID].normal(1.0, GLOBDAT.DM_noise, size = DM.shape)
-        assert DM.shape[0]  == DM.shape[1]  == DM.shape[2]  == GLOBDAT.DM_sidelength,  DM.shape
-        assert gas.shape[0] == gas.shape[1] == gas.shape[2] == GLOBDAT.gas_sidelength, gas.shape
-        assert gas_model.shape[0] == gas_model.shape[1] == gas_model.shape[2] == GLOBDAT.gas_sidelength, gas_model.shape
+        _offset = 0 if (GLOBDAT.dim == 1 and ARGS.type not in ['MOM2', ]) else 1
+        assert DM.shape[_offset+0]  == DM.shape[_offset+1]  == DM.shape[_offset+2]  == GLOBDAT.DM_sidelength,  DM.shape
+        assert gas.shape[_offset+0] == gas.shape[_offset+1] == gas.shape[_offset+2] == GLOBDAT.gas_sidelength, gas.shape
+        assert gas_model.shape[_offset+0] == gas_model.shape[_offset+1] == gas_model.shape[_offset+2] == GLOBDAT.gas_sidelength, gas_model.shape
+        #if GLOBDAT.dim > 1 :
+        #    assert DM.shape[0] == GLOBDAT.dim+1, DM.shape
+        #    assert gas.shape[0] == GLOBDAT.dim, gas.shape
+        #    assert gas_model.shape[0] == GLOBDAT.dim, gas_model.shape
 
         # TODO why do we need to .copy() again?
 #        if GLOBDAT.target_as_model() :
@@ -823,13 +1011,35 @@ class InputData(Dataset) :#{{{
 #                torch.from_numpy(np.array([__xx, __yy, __zz], dtype=int)),
 #                )
 #        else :
-        return (
-            torch.from_numpy(DM.copy()).unsqueeze(0),
-            torch.from_numpy(gas.copy()).unsqueeze(0),
-            torch.from_numpy(gas_model.copy()).unsqueeze(0),
-            torch.from_numpy(np.array([__xx, __yy, __zz], dtype=int)),
-            )
-        # add fake dimension (channel dimension is 0 here)
+        if GLOBDAT.dim == 1 and ARGS.type not in ['MOM2', ] :
+            # add fake dimension (channel dimension is 0 here)
+            return (
+                torch.from_numpy(DM.copy()).unsqueeze(0),
+                torch.from_numpy(gas.copy()).unsqueeze(0),
+                torch.from_numpy(gas_model.copy()).unsqueeze(0),
+                torch.from_numpy(np.array([__xx, __yy, __zz], dtype=int)),
+                )
+        elif GLOBDAT.dim>1 and ARGS.type in ['MOM', ] :
+            return (
+                torch.from_numpy(DM.copy()),
+                torch.from_numpy(gas.copy()),
+                torch.from_numpy(gas_model.copy()),
+                torch.from_numpy(np.array([__xx, __yy, __zz], dtype=int)),
+                )
+        elif GLOBDAT.dim>1 and ARGS.type in ['MOM1', ] :
+            return (
+                torch.from_numpy(DM.copy()),
+                torch.from_numpy(gas[0].copy()).unsqueeze(0),
+                torch.from_numpy(gas_model.copy()),
+                torch.from_numpy(np.array([__xx, __yy, __zz], dtype=int)),
+                )
+        elif GLOBDAT.dim==1 and ARGS.type in ['MOM2', ] :
+            return (
+                torch.from_numpy(DM[[ARGS.momdir,3],...].copy()),
+                torch.from_numpy(gas[ARGS.momdir].copy()).unsqueeze(0),
+                torch.from_numpy(gas_model[ARGS.momdir].copy()).unsqueeze(0),
+                torch.from_numpy(np.array([__xx, __yy, __zz], dtype=int)),
+                )
         """
         return (
             torch.from_numpy(np.empty((64,64,64))).unsqueeze(0),
@@ -881,9 +1091,7 @@ class BasicLayer(nn.Module) :#{{{
             },
 
         'activation': 'ReLU',
-        'activation_kw': {
-            'inplace': False,
-            },
+        'activation_kw': { },
 
         'crop_output': False,
 
@@ -1083,7 +1291,7 @@ class Network(nn.Module) :#{{{
                     if self.network_dict['Level_%d'%ii]['resize_to_gas'] :
                         intermediate_data[ii] = Network.__crop_tensor(
                             intermediate_data[ii],
-                            (intermediate_data[ii].shape[-1] * (GLOBDAT.DM_sidelength - GLOBDAT.gas_sidelength))/GLOBDAT.DM_sidelength # TODO CHECK
+                            (intermediate_data[ii].shape[-1] * (GLOBDAT.DM_sidelength - GLOBDAT.gas_sidelength))/GLOBDAT.DM_sidelength
                             )
                     x = torch.cat((x, intermediate_data[ii]), dim = 1)
                 if self.__globallocalskip :
@@ -1100,7 +1308,12 @@ class Network(nn.Module) :#{{{
                     if not self.__multiply_model :
                         x = torch.cat((x, xmodel), dim = 1)
                     else :
-                        x[:,0,...] = torch.mul(x[:,0,...], xmodel[:,0,...])
+                        if GLOBDAT.dim == 1 :
+                            x[:,0,...] = torch.mul(x[:,0,...], xmodel[:,0,...])
+                        elif GLOBDAT.dim>1 and ARGS.type in ['MOM', ] :
+                            x[:,:GLOBDAT.dim,...] = torch.mul(x[:,:GLOBDAT.dim,...], xmodel)
+                        elif GLOBDAT.dim>1 and ARGS.type in ['MOM1', ] :
+                            x[:,0,...] = torch.mul(x[:,0,...], xmodel[:,0,...])
                 x = self.__blocks[2*ii+1](x)
                 if self.__globallocalskip :
                     if ii == self.__globallocalskip_feed_out :
@@ -1164,15 +1377,22 @@ class Analysis(object) :#{{{
 
         self.original_field  = None
         self.predicted_field = None
+        self.model_field     = None
 
         self.original_power_spectrum = None
         self.predicted_power_spectrum = None
+        self.model_power_spectrum = None
+
         self.original_projpower_spectrum = None
         self.predicted_projpower_spectrum = None
-        self.cross = None
+        self.model_projpower_spectrum = None
+
+        self.cross_predicted = None
+        self.cross_model = None
 
         self.mean_all_original = None
         self.mean_all_predicted = None
+        self.mean_all_model = None
     #}}}
     @staticmethod
     def apodize(arr) :#{{{
@@ -1187,67 +1407,281 @@ class Analysis(object) :#{{{
         return arr
     #}}}
     def read_original(self) :#{{{
-        self.original_field = self.data.get_back['gas'](
-            self.data.datasets['gas'][0][
-                (GLOBDAT.DM_sidelength-GLOBDAT.gas_sidelength)/2 : self.data.xlength+(GLOBDAT.DM_sidelength+GLOBDAT.gas_sidelength)/2,
-                (GLOBDAT.DM_sidelength-GLOBDAT.gas_sidelength)/2 : self.data.ylength+(GLOBDAT.DM_sidelength+GLOBDAT.gas_sidelength)/2,
-                (GLOBDAT.DM_sidelength-GLOBDAT.gas_sidelength)/2 : self.data.zlength+(GLOBDAT.DM_sidelength+GLOBDAT.gas_sidelength)/2,
-                ]
+        if GLOBDAT.dim == 1 and ARGS.type not in ['MOM2', ]:
+            self.original_field = self.data.get_back['gas'](
+                self.data.datasets['gas'][0][
+                    (GLOBDAT.DM_sidelength-GLOBDAT.gas_sidelength)/2 : self.data.xlength+(GLOBDAT.DM_sidelength+GLOBDAT.gas_sidelength)/2,
+                    (GLOBDAT.DM_sidelength-GLOBDAT.gas_sidelength)/2 : self.data.ylength+(GLOBDAT.DM_sidelength+GLOBDAT.gas_sidelength)/2,
+                    (GLOBDAT.DM_sidelength-GLOBDAT.gas_sidelength)/2 : self.data.zlength+(GLOBDAT.DM_sidelength+GLOBDAT.gas_sidelength)/2,
+                    ]
+                )
+            self.original_field_mesh = Mesh(self.original_field)
+        elif GLOBDAT.dim>1 and ARGS.type in ['MOM', 'MOM1', ] :
+            self.original_field = self.data.get_back['gas'](
+                self.data.datasets['gas'][0][
+                    :,
+                    (GLOBDAT.DM_sidelength-GLOBDAT.gas_sidelength)/2 : self.data.xlength+(GLOBDAT.DM_sidelength+GLOBDAT.gas_sidelength)/2,
+                    (GLOBDAT.DM_sidelength-GLOBDAT.gas_sidelength)/2 : self.data.ylength+(GLOBDAT.DM_sidelength+GLOBDAT.gas_sidelength)/2,
+                    (GLOBDAT.DM_sidelength-GLOBDAT.gas_sidelength)/2 : self.data.zlength+(GLOBDAT.DM_sidelength+GLOBDAT.gas_sidelength)/2,
+                    ]
+                )
+            self.original_field_mesh = []
+            for ii in xrange(GLOBDAT.dim) :
+                self.original_field_mesh.append(Mesh(self.original_field[ii,...]))
+        elif GLOBDAT.dim==1 and ARGS.type in ['MOM2', ] :
+            self.original_field = self.data.get_back['gas'](
+                self.data.datasets['gas'][0][
+                    ARGS.momdir,
+                    (GLOBDAT.DM_sidelength-GLOBDAT.gas_sidelength)/2 : self.data.xlength+(GLOBDAT.DM_sidelength+GLOBDAT.gas_sidelength)/2,
+                    (GLOBDAT.DM_sidelength-GLOBDAT.gas_sidelength)/2 : self.data.ylength+(GLOBDAT.DM_sidelength+GLOBDAT.gas_sidelength)/2,
+                    (GLOBDAT.DM_sidelength-GLOBDAT.gas_sidelength)/2 : self.data.zlength+(GLOBDAT.DM_sidelength+GLOBDAT.gas_sidelength)/2,
+                    ]
+                )
+            self.original_field_mesh = Mesh(self.original_field)
+    #}}}
+    def read_model(self) :#{{{
+        if GLOBDAT.dim == 1 and ARGS.type not in ['MOM2', ]:
+            self.model_field = self.data.get_back['gas_model'](
+                self.data.datasets['gas_model'][0][
+                    (GLOBDAT.DM_sidelength-GLOBDAT.gas_sidelength)/2 : self.data.xlength+(GLOBDAT.DM_sidelength+GLOBDAT.gas_sidelength)/2,
+                    (GLOBDAT.DM_sidelength-GLOBDAT.gas_sidelength)/2 : self.data.ylength+(GLOBDAT.DM_sidelength+GLOBDAT.gas_sidelength)/2,
+                    (GLOBDAT.DM_sidelength-GLOBDAT.gas_sidelength)/2 : self.data.zlength+(GLOBDAT.DM_sidelength+GLOBDAT.gas_sidelength)/2,
+                    ]
+                )
+            self.model_field_mesh = Mesh(self.model_field)
+        elif GLOBDAT.dim>1 and ARGS.type in ['MOM', 'MOM1', ] :
+            self.model_field = self.data.get_back['gas_model'](
+                self.data.datasets['gas_model'][0][
+                    :,
+                    (GLOBDAT.DM_sidelength-GLOBDAT.gas_sidelength)/2 : self.data.xlength+(GLOBDAT.DM_sidelength+GLOBDAT.gas_sidelength)/2,
+                    (GLOBDAT.DM_sidelength-GLOBDAT.gas_sidelength)/2 : self.data.ylength+(GLOBDAT.DM_sidelength+GLOBDAT.gas_sidelength)/2,
+                    (GLOBDAT.DM_sidelength-GLOBDAT.gas_sidelength)/2 : self.data.zlength+(GLOBDAT.DM_sidelength+GLOBDAT.gas_sidelength)/2,
+                    ]
+                )
+            self.model_field_mesh = []
+            for ii in xrange(GLOBDAT.dim) :
+                self.model_field_mesh.append(Mesh(self.model_field[ii,...]))
+        elif GLOBDAT.dim==1 and ARGS.type in ['MOM2', ] :
+            self.model_field = self.data.get_back['gas_model'](
+                self.data.datasets['gas_model'][0][
+                    ARGS.momdir,
+                    (GLOBDAT.DM_sidelength-GLOBDAT.gas_sidelength)/2 : self.data.xlength+(GLOBDAT.DM_sidelength+GLOBDAT.gas_sidelength)/2,
+                    (GLOBDAT.DM_sidelength-GLOBDAT.gas_sidelength)/2 : self.data.ylength+(GLOBDAT.DM_sidelength+GLOBDAT.gas_sidelength)/2,
+                    (GLOBDAT.DM_sidelength-GLOBDAT.gas_sidelength)/2 : self.data.zlength+(GLOBDAT.DM_sidelength+GLOBDAT.gas_sidelength)/2,
+                    ]
+                )
+            self.model_field_mesh = Mesh(self.model_field)
+    #}}}
+    def load_prediction(self) :#{{{
+        # TODO adapt for MOM2
+        self.predicted_field = np.load(
+            ARGS['summary_path']+'%s_%s_%d.npy'%(ARGS.fieldpred,
+                                                 ARGS.output,
+                                                 ARGS['box_sidelength'])
+            if ARGS.type not in ['MOM2', ] else 
+            ARGS['summary_path']+'%s_%s_dir%d_%d.npy'%(ARGS.fieldpred,
+                                                       ARGS.output,
+                                                       ARGS.momdir,
+                                                       ARGS['box_sidelength'])
             )
-#        self.original_field_mesh = Mesh(Analysis.apodize(self.original_field))
-        self.original_field_mesh = Mesh(self.original_field)
-        self.original_field_mesh.read_mesh()
+        if GLOBDAT.dim == 1 :
+            self.predicted_field_mesh = Mesh(self.predicted_field)
+        else :
+            self.predicted_field_mesh = []
+            for ii in xrange(GLOBDAT.dim) :
+                self.predicted_field_mesh.append(Mesh(self.predicted_field[ii,...]))
     #}}}
     def predict_whole_volume(self) :#{{{
         # initialize prediction to -1 everywhere to check whether the whole volume
         # really is filled.
-        self.predicted_field = (-1.0)*np.ones(
-            (self.data.xlength+GLOBDAT.gas_sidelength, self.data.ylength+GLOBDAT.gas_sidelength, self.data.zlength+GLOBDAT.gas_sidelength),
-            dtype = np.float32
-            )
+        if GLOBDAT.dim == 1 :
+            self.predicted_field = (-1.0)*np.ones(
+                (self.data.xlength+GLOBDAT.gas_sidelength, self.data.ylength+GLOBDAT.gas_sidelength, self.data.zlength+GLOBDAT.gas_sidelength),
+                dtype = np.float32
+                )
+        elif ARGS.type in ['MOM', 'MOM1', ] :
+            self.predicted_field = (-1.0)*np.ones(
+                (GLOBDAT.dim, self.data.xlength+GLOBDAT.gas_sidelength, self.data.ylength+GLOBDAT.gas_sidelength, self.data.zlength+GLOBDAT.gas_sidelength),
+                dtype = np.float32
+                )
         loader = GLOBDAT.data_loader_(self.data)
         for t, data in enumerate(loader) :
             with torch.no_grad() :
-                pred = GLOBDAT.net(
-                    torch.autograd.Variable(data[0].to(DEVICE), requires_grad = False),
-                    torch.autograd.Variable(data[2].to(DEVICE), requires_grad = False)
-                    )[:,0,...].cpu().numpy()
+                if GLOBDAT.dim == 1 :
+                    if ARGS.type not in ['MOM2', ] :
+                        pred = GLOBDAT.net(
+                            torch.autograd.Variable(data[0].to(DEVICE), requires_grad = False),
+                            torch.autograd.Variable(data[2].to(DEVICE), requires_grad = False)
+                            )[:,0,...].cpu().numpy()
+                    else :
+                        if ARGS.momdir == 0 :
+                            pred = GLOBDAT.net(
+                                torch.autograd.Variable(data[0].to(DEVICE), requires_grad = False),
+                                torch.autograd.Variable(data[2].to(DEVICE), requires_grad = False)
+                                )[:,0,...].cpu().numpy()
+                        elif ARGS.momdir == 1 :
+                            pred = np.transpose(GLOBDAT.net(
+                                torch.autograd.Variable(torch.transpose(torch.transpose(data[0], 2, 3), 3, 4).to(DEVICE), requires_grad = False),
+                                torch.autograd.Variable(torch.transpose(torch.transpose(data[2], 2, 3), 3, 4).to(DEVICE), requires_grad = False)
+                                )[:,0,...].cpu().numpy(), axes=(0,3,1,2))
+                        elif ARGS.momdir == 2 :
+                            pred = np.transpose(GLOBDAT.net(
+                                torch.autograd.Variable(torch.transpose(torch.transpose(data[0], 2, 4), 3, 4).to(DEVICE), requires_grad = False),
+                                torch.autograd.Variable(torch.transpose(torch.transpose(data[2], 2, 4), 3, 4).to(DEVICE), requires_grad = False)
+                                )[:,0,...].cpu().numpy(), axes=(0,2,3,1))
+                elif GLOBDAT.dim>1 and ARGS.type in ['MOM', ] :
+                    pred = GLOBDAT.net(
+                        torch.autograd.Variable(data[0].to(DEVICE), requires_grad = False),
+                        torch.autograd.Variable(data[2].to(DEVICE), requires_grad = False)
+                        ).cpu().numpy()
+                elif GLOBDAT.dim>1 and ARGS.type in ['MOM1', ] :
+                    pred = np.empty((ARGS['data_loader_kw']['batch_size'], 3, GLOBDAT.gas_sidelength, GLOBDAT.gas_sidelength, GLOBDAT.gas_sidelength))
+                    pred[:,0,...] = (GLOBDAT.net(
+                        torch.autograd.Variable(data[0].to(DEVICE), requires_grad = False),
+                        torch.autograd.Variable(data[2].to(DEVICE), requires_grad = False)
+                        ).cpu().numpy())[:,0,...]
+                    pred[:,1,...] = (GLOBDAT.net(
+                        torch.autograd.Variable(torch.transpose(data[0], 2, 3)[:,[1,0,2,3],...].to(DEVICE), requires_grad = False),
+                        torch.autograd.Variable(torch.transpose(data[2], 2, 3)[:,[1,0,2],...].to(DEVICE), requires_grad = False)
+                        ).cpu().numpy())[:,0,...]
+                    pred[:,2,...] = (GLOBDAT.net(
+                        torch.autograd.Variable(torch.transpose(data[0], 2, 4)[:,[2,1,0,3],...].to(DEVICE), requires_grad = False),
+                        torch.autograd.Variable(torch.transpose(data[2], 2, 4)[:,[2,1,0],...].to(DEVICE), requires_grad = False)
+                        ).cpu().numpy())[:,0,...]
             __coords = data[-1].numpy()
             for ii in xrange(pred.shape[0]) : # loop over batch dimension
-                self.predicted_field[
-                    __coords[ii,0] : __coords[ii,0] + GLOBDAT.gas_sidelength,
-                    __coords[ii,1] : __coords[ii,1] + GLOBDAT.gas_sidelength,
-                    __coords[ii,2] : __coords[ii,2] + GLOBDAT.gas_sidelength
-                    ] = self.data.get_back['gas'](pred[ii,...])
-#        self.predicted_field_mesh = Mesh(Analysis.apodize(self.predicted_field))
-
-        self.predicted_field_mesh = Mesh(self.predicted_field)
-        self.predicted_field_mesh.read_mesh()
+                if GLOBDAT.dim == 1 :
+                    self.predicted_field[
+                        __coords[ii,0] : __coords[ii,0] + GLOBDAT.gas_sidelength,
+                        __coords[ii,1] : __coords[ii,1] + GLOBDAT.gas_sidelength,
+                        __coords[ii,2] : __coords[ii,2] + GLOBDAT.gas_sidelength
+                        ] = self.data.get_back['gas'](pred[ii,...])
+                else :
+                    self.predicted_field[
+                        :,
+                        __coords[ii,0] : __coords[ii,0] + GLOBDAT.gas_sidelength,
+                        __coords[ii,1] : __coords[ii,1] + GLOBDAT.gas_sidelength,
+                        __coords[ii,2] : __coords[ii,2] + GLOBDAT.gas_sidelength
+                        ] = self.data.get_back['gas'](pred[ii,...])
+        if GLOBDAT.dim == 1 :
+            self.predicted_field_mesh = Mesh(self.predicted_field)
+        elif GLOBDAT.dim>1 and ARGS.type in ['MOM', 'MOM1', ] :
+            self.predicted_field_mesh = []
+            for ii in xrange(GLOBDAT.dim) :
+                self.predicted_field_mesh.append(Mesh(self.predicted_field[ii,...]))
     #}}}
     def compute_powerspectrum(self, mode, save=True) :#{{{
         if mode is 'original' :
-            r = self.original_field_mesh.compute_powerspectrum()
-            self.original_power_spectrum = {
-                'k': r.power['k'],
-                'P': r.power['power'].real,
-                }
+            if GLOBDAT.dim == 1 :
+                if self.original_field_mesh.mesh is None :
+                    self.original_field_mesh.read_mesh()
+            else :
+                for ii in xrange(GLOBDAT.dim) :
+                    if self.original_field_mesh[ii].mesh is None :
+                        self.original_field_mesh[ii].read_mesh()
+            if GLOBDAT.dim == 1 :
+                r = self.original_field_mesh.compute_powerspectrum()
+                self.original_power_spectrum = {
+                    'k': r.power['k'],
+                    'P': r.power['power'].real,
+                    }
+            else :
+                k = []
+                P = []
+                for ii in xrange(GLOBDAT.dim) :
+                    r = self.original_field_mesh[ii].compute_powerspectrum()
+                    k.append(r.power['k'])
+                    P.append(r.power['power'].real)
+                self.original_power_spectrum = {
+                    'k': k,
+                    'P': P,
+                    }
             if save :
                 np.savez(
-                    ARGS['summary_path']+'%s_%s_%d.npz'%(ARGS.powerspectrumfid, ARGS.scaling, ARGS['box_sidelength']),
+                    (ARGS['summary_path']+'%s_%d.npz'%(ARGS.powerspectrumfid,
+                                                          ARGS['box_sidelength'])
+                     if ARGS.type not in ['MOM2', ] else
+                     ARGS['summary_path']+'%s_dir%d_%d.npz'%(ARGS.powerspectrumfid,
+                                                             ARGS.momdir,
+                                                             ARGS['box_sidelength'])),
                     **self.original_power_spectrum
                     )
                 if ARGS.verbose :
                     print 'Computed original power spectrum and saved to %s.npz'%ARGS.powerspectrumfid
-        elif mode is 'predicted' :
-            r = self.predicted_field_mesh.compute_powerspectrum()
-            self.predicted_power_spectrum = {
-                'k': r.power['k'],
-                'P': r.power['power'].real,
-                'epoch': EPOCH,
-                }
+        elif mode is 'model' :
+            if GLOBDAT.dim == 1 :
+                if self.model_field_mesh.mesh is None :
+                    self.model_field_mesh.read_mesh()
+            else :
+                for ii in xrange(GLOBDAT.dim) :
+                    if self.model_field_mesh[ii].mesh is None :
+                        self.model_field_mesh[ii].read_mesh()
+            if GLOBDAT.dim == 1 :
+                r = self.model_field_mesh.compute_powerspectrum()
+                self.model_power_spectrum = {
+                    'k': r.power['k'],
+                    'P': r.power['power'].real,
+                    }
+            else :
+                k = []
+                P = []
+                for ii in xrange(GLOBDAT.dim) :
+                    r = self.model_field_mesh[ii].compute_powerspectrum()
+                    k.append(r.power['k'])
+                    P.append(r.power['power'].real)
+                self.model_power_spectrum = {
+                    'k': k,
+                    'P': P,
+                    }
             if save :
                 np.savez(
-                    ARGS['summary_path']+'%s_%s_%d.npz'%(ARGS.powerspectrumpred, ARGS.output, ARGS['box_sidelength']),
+                    (ARGS['summary_path']+'%s_%d.npz'%(ARGS.powerspectrummdel,
+                                                          ARGS['box_sidelength'])
+                     if ARGS.type not in ['MOM2', ] else
+                     ARGS['summary_path']+'%s_dir%d_%d.npz'%(ARGS.powerspectrummdel,
+                                                             ARGS.momdir,
+                                                             ARGS['box_sidelength'])),
+                    **self.model_power_spectrum
+                    )
+                if ARGS.verbose :
+                    print 'Computed model power spectrum and saved to %s.npz'%ARGS.powerspectrummdel
+        elif mode is 'predicted' :
+            if GLOBDAT.dim == 1 :
+                if self.predicted_field_mesh.mesh is None :
+                    self.predicted_field_mesh.read_mesh()
+            else :
+                for ii in xrange(GLOBDAT.dim) :
+                    if self.predicted_field_mesh[ii].mesh is None :
+                        self.predicted_field_mesh[ii].read_mesh()
+            if GLOBDAT.dim == 1 :
+                r = self.predicted_field_mesh.compute_powerspectrum()
+                self.predicted_power_spectrum = {
+                    'k': r.power['k'],
+                    'P': r.power['power'].real,
+                    'epoch': EPOCH,
+                    }
+            else :
+                k = []
+                P = []
+                for ii in xrange(GLOBDAT.dim) :
+                    r = self.predicted_field_mesh[ii].compute_powerspectrum()
+                    k.append(r.power['k'])
+                    P.append(r.power['power'].real)
+                self.predicted_power_spectrum = {
+                    'k': k,
+                    'P': P,
+                    'epoch': EPOCH,
+                    }
+            if save :
+                np.savez(
+                    (ARGS['summary_path']+'%s_%s_%d.npz'%(ARGS.powerspectrumpred,
+                                                          ARGS.output,
+                                                          ARGS['box_sidelength'])
+                     if ARGS.type not in ['MOM2', ] else
+                     ARGS['summary_path']+'%s_%s_dir%d_%d.npz'%(ARGS.powerspectrumpred,
+                                                                ARGS.output,
+                                                                ARGS.momdir,
+                                                                ARGS['box_sidelength'])),
                     **self.predicted_power_spectrum
                     )
                 if ARGS.verbose :
@@ -1256,7 +1690,10 @@ class Analysis(object) :#{{{
             raise RuntimeError('Invalid mode in compute_powerspectrum, only original and predicted allowed.')
     #}}}
     def compute_projected_powerspectrum(self, mode) :#{{{
+    # FIXME not up to date
         if mode is 'original' :
+            if self.original_field_mesh.mesh is None :
+                self.original_field_mesh.read_mesh()
             r = self.original_field_mesh.compute_powerspectrum(2)
             self.original_projpower_spectrum = {
                 'k': r.power['k'],
@@ -1268,7 +1705,23 @@ class Analysis(object) :#{{{
                 )
             if ARGS.verbose :
                 print 'Computed original projected power spectrum and saved to %s_%s_%d.npz'%(ARGS.projpowerspectrumfid, ARGS.scaling, ARGS['box_sidelength'])
+        elif mode is 'model' :
+            if self.model_field_mesh.mesh is None :
+                self.model_field_mesh.read_mesh()
+            r = self.model_field_mesh.compute_powerspectrum(2)
+            self.model_projpower_spectrum = {
+                'k': r.power['k'],
+                'P': r.power['power'].real,
+                }
+            np.savez(
+                ARGS['summary_path']+'%s_%s_%d.npz'%(ARGS.projpowerspectrummdel, ARGS.scaling, ARGS['box_sidelength']),
+                **self.model_projpower_spectrum
+                )
+            if ARGS.verbose :
+                print 'Computed model projected power spectrum and saved to %s_%s_%d.npz'%(ARGS.projpowerspectrummdel, ARGS.scaling, ARGS['box_sidelength'])
         elif mode is 'predicted' :
+            if self.predicted_field_mesh.mesh is None :
+                self.predicted_field_mesh.read_mesh()
             r = self.predicted_field_mesh.compute_powerspectrum(2)
             self.predicted_projpower_spectrum = {
                 'k': r.power['k'],
@@ -1284,32 +1737,107 @@ class Analysis(object) :#{{{
         else :
             raise RuntimeError('Invalid mode in compute_powerspectrum, only original and predicted allowed.')
     #}}}
-    def compute_correlation_coeff(self) :#{{{
-        r = self.original_field_mesh.cross_power(self.predicted_field_mesh)
+    def compute_correlation_coeff(self, mode) :#{{{
+        if GLOBDAT.dim == 1 :
+            if self.original_field_mesh.mesh is None :
+                self.original_field_mesh.read_mesh()
+        else :
+            for ii in xrange(GLOBDAT.dim) :
+                if self.original_field_mesh[ii].mesh is None :
+                    self.original_field_mesh[ii].read_mesh()
+        if mode == 'predicted' :
+            if GLOBDAT.dim == 1 :
+                if self.predicted_field_mesh.mesh is None :
+                    self.predicted_field_mesh.read_mesh()
+            else :
+                for ii in xrange(GLOBDAT.dim) :
+                    if self.predicted_field_mesh[ii].mesh is None :
+                        self.predicted_field_mesh[ii].read_mesh()
+            if GLOBDAT.dim == 1 :
+                r = self.original_field_mesh.cross_power(self.predicted_field_mesh)
+            else :
+                r = []
+                for ii in xrange(GLOBDAT.dim) :
+                    r.append(self.original_field_mesh[ii].cross_power(self.predicted_field_mesh[ii]))
+            if self.predicted_power_spectrum is None :
+                self.compute_powerspectrum('predicted', False)
+            if GLOBDAT.dim == 1 :
+                assert np.allclose(r.power['k'], self.predicted_power_spectrum['k'])
+            else :
+                for ii in xrange(GLOBDAT.dim) :
+                    assert np.allclose(r[ii].power['k'], self.predicted_power_spectrum['k'][ii])
+        elif mode == 'model' :
+            if GLOBDAT.dim == 1 :
+                if self.model_field_mesh.mesh is None :
+                    self.model_field_mesh.read_mesh()
+            else :
+                for ii in xrange(GLOBDAT.dim) :
+                    if self.model_field_mesh[ii].mesh is None :
+                        self.model_field_mesh[ii].read_mesh()
+            if GLOBDAT.dim == 1 :
+                r = self.model_field_mesh.cross_power(self.model_field_mesh)
+            else :
+                r = []
+                for ii in xrange(GLOBDAT.dim) :
+                    r.append(self.model_field_mesh[ii].cross_power(self.model_field_mesh[ii]))
+            if self.model_power_spectrum is None :
+                self.compute_powerspectrum('model', False)
+            if GLOBDAT.dim == 1 :
+                assert np.allclose(r.power['k'], self.model_power_spectrum['k'])
+            else :
+                for ii in xrange(GLOBDAT.dim) :
+                    assert np.allclose(r[ii].power['k'], self.model_power_spectrum['k'][ii])
         if self.original_power_spectrum is None :
             self.compute_powerspectrum('original', False)
-        if self.predicted_power_spectrum is None :
-            self.compute_powerspectrum('predicted', False)
-        assert np.allclose(r.power['k'], self.original_power_spectrum['k'])
-        assert np.allclose(r.power['k'], self.predicted_power_spectrum['k'])
-        self.cross = {
-            'k': r.power['k'],
-            'r': r.power['power'].real/np.sqrt(self.original_power_spectrum['P']*self.predicted_power_spectrum['P']),
+        if GLOBDAT.dim == 1 :
+            assert np.allclose(r.power['k'], self.original_power_spectrum['k'])
+        else :
+            for ii in xrange(GLOBDAT.dim) :
+                assert np.allclose(r[ii].power['k'], self.original_power_spectrum['k'][ii])
+        if GLOBDAT.dim == 1 :
+            self.cross = {
+                'k': r.power['k'],
+                'r': r.power['power'].real/np.sqrt(self.original_power_spectrum['P']
+                                                   *(self.predicted_power_spectrum['P'] if mode == 'predicted'
+                                                     else self.model_power_spectrum['P'] if mode == 'model'
+                                                     else False)),
+                'epoch': EPOCH,
+                }
+        else :
+            self.cross = {
+            'k': [r[ii].power['k'] for ii in xrange(GLOBDAT.dim)],
+            'r': [r[ii].power['power'].real/np.sqrt(self.original_power_spectrum['P'][ii]
+                                                    *(self.predicted_power_spectrum['P'][ii] if mode == 'predicted'
+                                                      else self.model_power_spectrum['P'][ii] if mode == 'model'
+                                                      else False)) for ii in xrange(GLOBDAT.dim)],
             'epoch': EPOCH,
             }
         np.savez(
-            ARGS['summary_path']+'%s_%s_%d.npz'%(ARGS.crosspower, ARGS.output, ARGS['box_sidelength']),
+            (ARGS['summary_path']+'%s_%s_%d.npz'%(ARGS.crosspowerpred if mode == 'predicted'
+                                                 else ARGS.crosspowermdel if mode == 'model'
+                                                 else False, ARGS.output, ARGS['box_sidelength'])
+             if ARGS.type not in ['MOM2', ] else
+             ARGS['summary_path']+'%s_%s_dir%d_%d.npz'%(ARGS.crosspowerpred if mode == 'predicted'
+                                                        else ARGS.crosspowermdel if mode == 'model'
+                                                        else False,
+                                                        ARGS.output,
+                                                        ARGS.momdir,
+                                                        ARGS['box_sidelength'])),
             **self.cross
             )
         if ARGS.verbose :
-            print 'Computed correlation coefficient and saved to %s_%s_%d.npz'%(ARGS.crosspower, ARGS.output, ARGS['box_sidelength'])
+            print 'Computed correlation coefficient'
 
     #}}}
     def compute_onepoint(self, mode) :#{{{
+        bins = 1e-7 * np.linspace(1e-2, 0.3, num=101) if ARGS.type=='N' \
+               else np.linspace(1e-2, 1e1, num=101) if ARGS.type=='P' \
+               else 2.17665619e-09 * np.linspace(-3000.0, 3000.0, num=101) if ARGS.type in ['MOM', 'MOM1', 'MOM2', ] \
+               else None
         if mode is 'original' :
             h, edges = np.histogram(
                 self.original_field,
-                bins = np.linspace(1e-2, 1e1, num = 101),
+                bins = bins,
                 density = False,
                 )
             h = h.astype(float)/float(self.original_field.size)
@@ -1317,7 +1845,12 @@ class Analysis(object) :#{{{
             std_all  = np.std(self.original_field)
             mean_high = np.mean(self.original_field[self.original_field>std_all])
             np.savez(
-                ARGS['summary_path']+'%s_%s_%d.npz'%(ARGS.onepointfid, ARGS.scaling, ARGS['box_sidelength']),
+                (ARGS['summary_path']+'%s_%d.npz'%(ARGS.onepointfid,
+                                                   ARGS['box_sidelength'])
+                 if ARGS.type not in ['MOM2', ] else
+                 ARGS['summary_path']+'%s_dir%d_%d.npz'%(ARGS.onepointfid,
+                                                         ARGS.momdir,
+                                                         ARGS['box_sidelength'])),
                 h = h,
                 edges = edges,
                 mean_all = self.mean_all_original,
@@ -1326,10 +1859,35 @@ class Analysis(object) :#{{{
                 )
             if ARGS.verbose :
                 print 'Computed fiducial one-point PDF and saved to %s.npz'%ARGS.onepointfid
+        elif mode is 'model' :
+            h, edges = np.histogram(
+                self.model_field,
+                bins = bins,
+                density = False,
+                )
+            h = h.astype(float)/float(self.model_field.size)
+            self.mean_all_model = np.mean(self.model_field)
+            std_all  = np.std(self.model_field)
+            mean_high = np.mean(self.model_field[self.model_field>std_all])
+            np.savez(
+                (ARGS['summary_path']+'%s_%d.npz'%(ARGS.onepointmdel,
+                                                   ARGS['box_sidelength'])
+                 if ARGS.type not in ['MOM2', ] else
+                 ARGS['summary_path']+'%s_dir%d_%d.npz'%(ARGS.onepointmdel,
+                                                         ARGS.momdir,
+                                                         ARGS['box_sidelength'])),
+                h = h,
+                edges = edges,
+                mean_all = self.mean_all_model,
+                std_all = std_all,
+                mean_high = mean_high,
+                )
+            if ARGS.verbose :
+                print 'Computed model one-point PDF and saved to %s.npz'%ARGS.onepointmdel
         elif mode is 'predicted' :
             h, edges = np.histogram(
                 self.predicted_field,
-                bins = np.linspace(1e-2, 1e1, num = 101),
+                bins = bins,
                 density = False,
                 )
             h = h.astype(float)/float(self.predicted_field.size)
@@ -1337,7 +1895,14 @@ class Analysis(object) :#{{{
             std_all = np.std(self.predicted_field)
             mean_high = np.mean(self.predicted_field[self.predicted_field>std_all])
             np.savez(
-                ARGS['summary_path']+'%s_%s_%d.npz'%(ARGS.onepointpred, ARGS.output, ARGS['box_sidelength']),
+                (ARGS['summary_path']+'%s_%s_%d.npz'%(ARGS.onepointpred,
+                                                      ARGS.output,
+                                                      ARGS['box_sidelength'])
+                 if ARGS.type not in ['MOM2', ] else
+                 ARGS['summary_path']+'%s_%s_dir%d_%d.npz'%(ARGS.onepointpred,
+                                                            ARGS.output,
+                                                            ARGS.momdir,
+                                                            ARGS['box_sidelength'])),
                 h = h,
                 edges = edges,
                 mean_all = self.mean_all_predicted,
@@ -1349,9 +1914,182 @@ class Analysis(object) :#{{{
                 print 'Computed predicted one-point PDF and saved to %s_%s.npz'%(ARGS.onepointpred, ARGS.output)
     #}}}
     def save_predicted_volume(self) :#{{{
-        self.predicted_field.tofile(ARGS['summary_path']+'%s_%s_%d.bin'%(ARGS.fieldpred, ARGS.output, ARGS['box_sidelength']))
+        np.save(
+            (ARGS['summary_path']+'%s_%s_%d.npy'%(ARGS.fieldpred,
+                                                  ARGS.output,
+                                                  ARGS['box_sidelength'])
+             if ARGS.type not in ['MOM2', ] else
+             ARGS['summary_path']+'%s_%s_dir%d_%d.npy'%(ARGS.fieldpred,
+                                                        ARGS.output,
+                                                        ARGS.momdir,
+                                                        ARGS['box_sidelength'])),
+            self.predicted_field
+            )
+    #}}}
+    def del_numpy_arr(self, mode) :#{{{
+        if mode == 'original' :
+            self.original_field = None
+        elif mode == 'predicted' :
+            self.predicted_field = None
+        elif mode == 'model' :
+            self.model_field = None
+        else :
+            raise RuntimeError('Invalid mode in del_numpy_arr.')
+    #}}}
+    def del_mesh(self, mode) :#{{{
+        if GLOBDAT.dim == 1 :
+            if mode == 'original' :
+                self.original_field_mesh.mesh = None
+            elif mode == 'predicted' :
+                self.predicted_field_mesh.mesh = None
+            elif mode == 'model' :
+                self.model_field_mesh.mesh = None
+            else :
+                raise RuntimeError('Invalid mode in del_mesh.')
+        else :
+            for ii in xrange(GLOBDAT.dim) :
+                if mode == 'original' :
+                    self.original_field_mesh[ii].mesh = None
+                elif mode == 'predicted' :
+                    self.predicted_field_mesh[ii].mesh = None
+                elif mode == 'model' :
+                    self.model_field_mesh[ii].mesh = None
+                else :
+                    raise RuntimeError('Invalid mode in del_mesh.')
     #}}}
 #}}}
+
+class Field(object) :#{{{
+    def __init__(self, mode, source=None) :#{{{
+        _modes = ['fiducial', 'model', 'predicted', ]
+        self.mode = mode
+        self.source = source
+        assert self.mode in _modes
+        if self.mode == 'predicted' :
+            self.data = np.load(ARGS['summary_path']+'%s_%s_%d'%(ARGS.fieldpred, ARGS.output, ARGS['box_sidelength']))
+        else :
+            assert isinstance(self.source, InputData)
+            self.data = self.source.get_back['gas' if self.mode=='fiducial'
+                                             else 'gas_model' if self.mode=='model' else None](
+                self.source.datasets['gas' if self.mode=='fiducial' else 'gas_model' if self.mode=='model' else None][0][
+                    (GLOBDAT.DM_sidelength-GLOBDAT.gas_sidelength)/2 : self.source.xlength+(GLOBDAT.DM_sidelength+GLOBDAT.gas_sidelength)/2,
+                    (GLOBDAT.DM_sidelength-GLOBDAT.gas_sidelength)/2 : self.source.ylength+(GLOBDAT.DM_sidelength+GLOBDAT.gas_sidelength)/2,
+                    (GLOBDAT.DM_sidelength-GLOBDAT.gas_sidelength)/2 : self.source.zlength+(GLOBDAT.DM_sidelength+GLOBDAT.gas_sidelength)/2,
+                    ]
+                )
+        if ARGS.verbose :
+            print 'Loaded data in Field(%s)'%self.mode
+
+        self.BoxSize = GLOBDAT.box_size/float(GLOBDAT.box_sidelength) * np.array(self.data.shape)
+        self.BoxSize = np.unique(self.BoxSize)
+        assert len(self.BoxSize) == 1, 'These routines only work for a cubic box at the moment.'
+        self.BoxSize = self.BoxSize.item()
+        self.MAS = None # mass assignment scheme for pylians
+
+        self.onepointname = ARGS.onepointfid if self.mode == 'fiducial'        \
+                            else ARGS.onepointmdel if self.mode == 'model'     \
+                            else ARGS.onepointpred if self.mode == 'predicted' \
+                            else None
+        self.onepoint = None
+        self.powerspectrumname = ARGS.powerspectrumfid if self.mode == 'fiducial'        \
+                                 else ARGS.powerspectrummdel if self.mode == 'model'     \
+                                 else ARGS.powerspectrumpred if self.mode == 'predicted' \
+                                 else None
+        self.powerspectrum = None
+        self.crosspowername = ARGS.crosspowermdel if self.mode == 'model'          \
+                              else ARGS.crosspowerpred if self.mode == 'predicted' \
+                              else None
+        self.crosspower = None
+        self.bispectrumname = ARGS.bispectrumfid if self.mode == 'fiducial'        \
+                              else ARGS.bispectrummdel if self.mode == 'model'     \
+                              else ARGS.bispectrumpred if self.mode == 'predicted' \
+                              else None
+        self.bispectrum = None
+
+        concat_names = lambda name : '%s_%s_%d'%(name, ARGS.output, ARGS['box_sidelength']) \
+                                     if self.mode=='predicted'                              \
+                                     else '%s_%d'%(name, ARGS['box_sidelength'])
+        self.onepointname = concat_names(self.onepointname)
+        self.powerspectrumname = concat_names(self.powerspectrumname)
+        self.crosspowername = concat_names(self.crosspowername)
+        self.bispectrumname = concat_names(self.bispectrumname)
+    #}}}
+    def compute_onepoint(self, save=True) :#{{{
+        h, e = np.histogram(self.data, bins=np.linspace(1e-2, 1e1, num=101), density=False)
+        h = h.astype(float)/float(self.data.size)
+        self.onepoint = {'h': h, 'edges': e, }
+        if save :
+            np.savez(ARGS['summary_path']+'%s.npz'%self.onepointname,
+                     **self.onepoint)
+
+        if ARGS.verbose :
+            print 'Computed onepoint in Field(%s)'%self.mode
+    #}}}
+    def __compute_powerspectrum(self) :#{{{
+        Pk = PKL.Pk(self.data, self.BoxSize, 0, self.MAS, ARGS.threads)
+        self.powerspectrum = {'k': Pk.k1D, 'P': Pk1D, }
+    #}}}
+    def _save_powerspectrum(self) :#{{{
+        np.savez(ARGS['summary_path']+'%s.npz'%self.powerspectrumname,
+                 **self.powerspectrum)
+    #}}}
+    def compute_powerspectrum(self, other, save=True) :#{{{
+        if other is None :
+            self.__compute_powerspectrum(save)
+            if save :
+                self._save_powerspectrum()
+        else :
+            assert isinstance(other, Field)
+            assert np.allclose(self.BoxSize, other.BoxSize)
+            Pk = PKL.XPk([self.data, other.data], self.BoxSize, 0, [self.MAS, other.MAS], ARGS.threads)
+            self.powerspectrum = {'k': Pk.k1D, 'P': Pk.Pk1D[:,0], }
+            other.powerspectrum = {'k': Pk.k1D, 'P': Pk.Pk1D[:,1], }
+            self.crosspower = {'k': Pk.k1D, 'r': Pk.PkX1d[:,0]/np.sqrt(Pk.Pk1d[:,0]*Pk.Pk1d[:,1]), }
+            if save :
+                self._save_powerspectrum()
+                other._save_powerspectrum()
+                np.savez(ARGS['summary_path']+'%s.npz'%self.crosspowername,
+                         **self.crosspower)
+
+        if ARGS.verbose :
+            print 'Computed powerspectrum in Field(%s)'%self.mode
+    #}}}
+    def compute_bispectrum(self, save=True) :#{{{
+        # (1) triangle configurations k = 1, 3, varying angles
+        _k1 = 1.0
+        _k2 = 3.0
+        _theta = np.linspace(0.0, np.pi, num=20)
+        Bk1 = PKL.Bk(self.data, self.BoxSize, _k1, _k2, _theta, self.MAS, ARGS.threads).Q
+        if ARGS.verbose :
+            print 'Computed Bk1 in Field(%s)'%self.mode
+
+        # (2) triangle configurations k = 0.1, 0.3, varying angles
+        _k1 = 0.2
+        _k2 = 0.3
+        _theta = np.linspace(0.0, np.pi, num=20)
+        Bk2 = PKL.Bk(self.data, self.BoxSize, _k1, _k2, _theta, self.MAS, ARGS.threads).Q
+        if ARGS.verbose :
+            print 'Computed Bk2 in Field(%s)'%self.mode
+
+        # (3) equilateral triangle configurations
+        _k = 10.0**np.linspace(-1.0, np.log10(5.0), num=20)
+        _theta = np.pi/3.0
+        Bk3 = []
+        for k in _k :
+            Bk3.append(PKL.Bk(self.data, self.BoxSize, k, k, _theta, self.MAS, ARGS.threads).Q)
+        if ARGS.verbose :
+            print 'Computed Bk3 in Field(%s)'%self.mode
+
+        self.bispectrum = {'Bk1': Bk1, 'Bk2': Bk2, 'Bk3': Bk3, }
+        if save :
+            np.savez(ARGS['summary_path']+'%s.npz'%self.bispectrumname,
+                     **self.bispectrum)
+
+        if ARGS.verbose :
+            print 'Computed bispectrum in Field(%s)'%self.mode
+    #}}}
+#}}}
+
 
 if __name__ == '__main__' :
     # set global variables#{{{
@@ -1373,6 +2111,35 @@ if __name__ == '__main__' :
         DEVICE = torch.device('cpu')
     ARGS = _ArgParser()
     GLOBDAT = GlobalData()
+    #}}}
+
+    # TESTING
+    if ARGS.mode == 'test' :#{{{
+        GLOBDAT.net = nn.DataParallel(Network(import_module(ARGS.network).this_network))
+        GLOBDAT.load_network('trained_network_%s.pt'%ARGS.output)
+#        GLOBDAT.net.to(DEVICE)
+#        GLOBDAT.net.eval()
+        
+        stepper = Stepper('testing')
+        with InputData('testing', stepper) as testing_set :
+            a = Analysis(testing_set)
+#            a.predict_whole_volume()
+#            a.save_predicted_volume()
+
+            a.read_original()
+            a.read_model()
+#            a.load_prediction()
+
+#            a.compute_onepoint('original')
+#            a.compute_onepoint('model')
+#            a.compute_onepoint('predicted')
+
+            a.compute_powerspectrum('original')
+            a.compute_powerspectrum('model')
+#            a.compute_powerspectrum('predicted')
+
+#            a.compute_correlation_coeff('model')
+#            a.compute_correlation_coeff('predicted')
     #}}}
 
     # OUTPUT VALIDATION
@@ -1497,15 +2264,30 @@ if __name__ == '__main__' :
                 a = Analysis(validation_set)
 
                 a.read_original()
-#                a.compute_powerspectrum('original')
-#                a.compute_projected_powerspectrum('original')
-#                a.compute_onepoint('original')
+#                a.read_model()
                 a.predict_whole_volume()
-                a.compute_powerspectrum('predicted')
-                a.compute_projected_powerspectrum('predicted')
-                a.compute_onepoint('predicted')
-                a.compute_correlation_coeff()
 #                a.save_predicted_volume()
+#                a.load_prediction()
+
+#                a.compute_onepoint('original')
+#                a.compute_onepoint('model')
+                a.compute_onepoint('predicted')
+
+                # Now we don't need the numpy arrays anymore, delete to save memory
+#                a.del_numpy_arr('predicted')
+#                a.del_numpy_arr('original')
+#                a.del_numpy_arr('model')
+
+#                a.compute_powerspectrum('original')
+#                a.compute_powerspectrum('model')
+                a.compute_powerspectrum('predicted')
+
+#                a.compute_projected_powerspectrum('original')
+#                a.compute_projected_powerspectrum('predicted')
+#                a.compute_projected_powerspectrum('model')
+
+                a.compute_correlation_coeff('predicted')
+#                a.compute_correlation_coeff('model')
 
                 if False :
                     plt.loglog(
@@ -1602,6 +2384,10 @@ if __name__ == '__main__' :
                         else :
                             if ARGS.verbose :
                                 print 'Found infinity in training loss, not backpropagating.'
+                            loss.backward()
+                            del loss
+                            torch.cuda.empty_cache()
+                            gc.collect()
                         
                         if GLOBDAT.stop_training() and not ARGS.debug :
                             GLOBDAT.save_loss('loss_%s.npz'%ARGS.output)
@@ -1622,7 +2408,10 @@ if __name__ == '__main__' :
                             torch.autograd.Variable(data_val[2].to(DEVICE), requires_grad=False)
                             )
                         __targ = torch.autograd.Variable(data_val[1].to(DEVICE), requires_grad=False)
-                        _loss += loss_function_valid(__pred, __targ).item()
+                        # FIXME
+                        _to_add = loss_function_valid(__pred, __targ).item()
+                        print _to_add
+                        _loss += _to_add
                 # end evaluate on validation set
 
                 if ARGS.verbose :
@@ -1645,4 +2434,29 @@ if __name__ == '__main__' :
                         GLOBDAT.save_network('trained_network_%s_%d.pt'%(ARGS.output, EPOCH), False)
 
                 EPOCH += 1
+    #}}}
+
+    # INTERROGATION
+    if ARGS.mode == 'interrogate' :#{{{
+        GLOBDAT.net = nn.DataParallel(Network(import_module(ARGS.network).this_network))
+        GLOBDAT.load_network('trained_network_%s.pt'%ARGS.output)
+        GLOBDAT.net.to(DEVICE)
+        GLOBDAT.net.eval()
+
+        interrogation_boxes = [
+#            'halo_pair',
+#            'most_massive_halo',
+#            'random_halo',
+#            'synthetic_halo',
+            'synthetic_halo_wsub',
+            ]
+
+        for b in interrogation_boxes :
+            f = np.load('./Interrogation/%s.npz'%b)
+            
+            with torch.no_grad() :
+                pred = GLOBDAT.net(torch.autograd.variable(torch.from_numpy(f['DM'].astype(np.float32)).unsqueeze(0).unsqueeze(0).to(DEVICE), requires_grad=False),
+                                   torch.autograd.variable(torch.from_numpy(f['gas_model'].astype(np.float32)).unsqueeze(0).unsqueeze(0).to(DEVICE), requires_grad=False))
+                pred = pred.cpu().numpy()
+            np.save('./Interrogation/%s_pred.npy'%b, pred)
     #}}}

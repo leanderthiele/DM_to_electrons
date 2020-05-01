@@ -1361,7 +1361,9 @@ class Mesh(object) :#{{{
             axes = [0, 1, 2]
             axes.remove(axis)
             axes = tuple(axes)
-            return ProjectedFFTPower(self.mesh, axes = axes)
+            return ProjectedFFTPower(self.mesh, axes=axes,
+                                     dk=None if self.arr.shape[0]==self.arr.shape[1]==self.arr.shape[2]
+                                        else 0.1)
     #}}}
     def cross_power(self, other) :#{{{
         if self.mesh is None or other.mesh is None :
@@ -1636,7 +1638,7 @@ class Analysis(object) :#{{{
             if save :
                 np.savez(
                     (ARGS['summary_path']+'%s_%d.npz'%(ARGS.powerspectrummdel,
-                                                          ARGS['box_sidelength'])
+                                                       ARGS['box_sidelength'])
                      if ARGS.type not in ['MOM2', ] else
                      ARGS['summary_path']+'%s_dir%d_%d.npz'%(ARGS.powerspectrummdel,
                                                              ARGS.momdir,
@@ -1694,13 +1696,18 @@ class Analysis(object) :#{{{
         if mode is 'original' :
             if self.original_field_mesh.mesh is None :
                 self.original_field_mesh.read_mesh()
-            r = self.original_field_mesh.compute_powerspectrum(2)
+            r = self.original_field_mesh.compute_powerspectrum(2 if ARGS.type not in ['MOM2', ] else ARGS.momdir)
             self.original_projpower_spectrum = {
                 'k': r.power['k'],
                 'P': r.power['power'].real,
                 }
             np.savez(
-                ARGS['summary_path']+'%s_%s_%d.npz'%(ARGS.projpowerspectrumfid, ARGS.scaling, ARGS['box_sidelength']),
+                (ARGS['summary_path']+'%s_%d.npz'%(ARGS.projpowerspectrumfid,
+                                                   ARGS['box_sidelength'])
+                 if ARGS.type not in ['MOM2', ] else
+                 ARGS['summary_path']+'%s_dir%d_%d.npz'%(ARGS.projpowerspectrumfid,
+                                                         ARGS.momdir,
+                                                         ARGS['box_sidelength'])),
                 **self.original_projpower_spectrum
                 )
             if ARGS.verbose :
@@ -1708,13 +1715,18 @@ class Analysis(object) :#{{{
         elif mode is 'model' :
             if self.model_field_mesh.mesh is None :
                 self.model_field_mesh.read_mesh()
-            r = self.model_field_mesh.compute_powerspectrum(2)
+            r = self.model_field_mesh.compute_powerspectrum(2 if ARGS.type not in ['MOM2', ] else ARGS.momdir)
             self.model_projpower_spectrum = {
                 'k': r.power['k'],
                 'P': r.power['power'].real,
                 }
             np.savez(
-                ARGS['summary_path']+'%s_%s_%d.npz'%(ARGS.projpowerspectrummdel, ARGS.scaling, ARGS['box_sidelength']),
+                (ARGS['summary_path']+'%s_%d.npz'%(ARGS.projpowerspectrummdel,
+                                                   ARGS['box_sidelength'])
+                 if ARGS.type not in ['MOM2', ] else
+                 ARGS['summary_path']+'%s_dir%d_%d.npz'%(ARGS.projpowerspectrummdel,
+                                                         ARGS.momdir,
+                                                         ARGS['box_sidelength'])),
                 **self.model_projpower_spectrum
                 )
             if ARGS.verbose :
@@ -1722,14 +1734,21 @@ class Analysis(object) :#{{{
         elif mode is 'predicted' :
             if self.predicted_field_mesh.mesh is None :
                 self.predicted_field_mesh.read_mesh()
-            r = self.predicted_field_mesh.compute_powerspectrum(2)
+            r = self.predicted_field_mesh.compute_powerspectrum(2 if ARGS.type not in ['MOM2', ] else ARGS.momdir)
             self.predicted_projpower_spectrum = {
                 'k': r.power['k'],
                 'P': r.power['power'].real,
                 'epoch': EPOCH,
                 }
             np.savez(
-                ARGS['summary_path']+'%s_%s_%d.npz'%(ARGS.projpowerspectrumpred, ARGS.output, ARGS['box_sidelength']),
+                (ARGS['summary_path']+'%s_%s_%d.npz'%(ARGS.projpowerspectrumpred,
+                                                      ARGS.output,
+                                                      ARGS['box_sidelength'])
+                 if ARGS.type not in ['MOM2', ] else
+                 ARGS['summary_path']+'%s_%s_dir%d_%d.npz'%(ARGS.projpowerspectrumpred,
+                                                            ARGS.output,
+                                                            ARGS.momdir,
+                                                            ARGS['box_sidelength'])),
                 **self.predicted_projpower_spectrum
                 )
             if ARGS.verbose :
@@ -2128,15 +2147,19 @@ if __name__ == '__main__' :
 
             a.read_original()
             a.read_model()
-#            a.load_prediction()
+            a.load_prediction()
 
 #            a.compute_onepoint('original')
 #            a.compute_onepoint('model')
 #            a.compute_onepoint('predicted')
 
-            a.compute_powerspectrum('original')
-            a.compute_powerspectrum('model')
+#            a.compute_powerspectrum('original')
+#            a.compute_powerspectrum('model')
 #            a.compute_powerspectrum('predicted')
+            
+            a.compute_projected_powerspectrum('original')
+            a.compute_projected_powerspectrum('model')
+            a.compute_projected_powerspectrum('predicted')
 
 #            a.compute_correlation_coeff('model')
 #            a.compute_correlation_coeff('predicted')
